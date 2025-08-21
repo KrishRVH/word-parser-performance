@@ -9,21 +9,39 @@ echo ""
 # Check dependencies
 check_dependency() {
     if ! command -v $1 &> /dev/null; then
-        echo "❌ $1 is not installed"
+        echo "✗ $1 is not installed"
         return 1
     else
-        echo "✓ $1 is installed ($($1 --version 2>&1 | head -n1))"
+        # Special handling for go which doesn't accept --version
+        if [ "$1" = "go" ]; then
+            echo "✓ $1 is installed ($(go version 2>&1))"
+        else
+            echo "✓ $1 is installed ($($1 --version 2>&1 | head -n1))"
+        fi
         return 0
     fi
 }
 
 echo "Checking dependencies..."
-HAS_NODE=$(check_dependency node && echo 1 || echo 0)
-HAS_PHP=$(check_dependency php && echo 1 || echo 0)
-HAS_RUST=$(check_dependency rustc && echo 1 || echo 0)
-HAS_DOTNET=$(check_dependency dotnet && echo 1 || echo 0)
-HAS_GCC=$(check_dependency gcc && echo 1 || echo 0)
-HAS_GO=$(check_dependency go && echo 1 || echo 0)
+# Fixed: Now properly setting variables without capturing echo output
+check_dependency node
+HAS_NODE=$?; HAS_NODE=$((1-HAS_NODE))
+
+check_dependency php
+HAS_PHP=$?; HAS_PHP=$((1-HAS_PHP))
+
+check_dependency rustc
+HAS_RUST=$?; HAS_RUST=$((1-HAS_RUST))
+
+check_dependency dotnet
+HAS_DOTNET=$?; HAS_DOTNET=$((1-HAS_DOTNET))
+
+check_dependency gcc
+HAS_GCC=$?; HAS_GCC=$((1-HAS_GCC))
+
+check_dependency go
+HAS_GO=$?; HAS_GO=$((1-HAS_GO))
+
 echo ""
 
 # Create test file if it doesn't exist
@@ -77,11 +95,14 @@ echo ""
 # Compile Rust if available
 if [ "$HAS_RUST" = "1" ]; then
     echo "Compiling Rust version with optimizations..."
-    RUSTC_VERSION=$(rustc --version | cut -d' ' -f2) rustc -O wordcount.rs -o wordcount_rust 2>/dev/null
+    rustc -O wordcount.rs -o wordcount_rust 2>rust_error.log
     if [ $? -eq 0 ]; then
         echo "✓ Rust compilation successful"
+        rm -f rust_error.log
     else
-        echo "❌ Rust compilation failed"
+        echo "✗ Rust compilation failed - Error details:"
+        cat rust_error.log | head -10
+        echo ""
         HAS_RUST=0
     fi
 fi
@@ -93,7 +114,7 @@ if [ "$HAS_GCC" = "1" ]; then
     if [ $? -eq 0 ]; then
         echo "✓ C compilation successful"
     else
-        echo "❌ C compilation failed"
+        echo "✗ C compilation failed"
         HAS_GCC=0
     fi
 fi
@@ -105,7 +126,7 @@ if [ "$HAS_GO" = "1" ]; then
     if [ $? -eq 0 ]; then
         echo "✓ Go compilation successful"
     else
-        echo "❌ Go compilation failed"
+        echo "✗ Go compilation failed"
         HAS_GO=0
     fi
 fi
@@ -119,7 +140,7 @@ if [ "$HAS_DOTNET" = "1" ]; then
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <PublishSingleFile>true</PublishSingleFile>
@@ -140,16 +161,22 @@ EOF
             if [ $? -eq 0 ]; then
                 echo "✓ C# compilation successful (using csc)"
             else
-                echo "❌ C# compilation failed"
+                echo "✗ C# compilation failed"
                 HAS_DOTNET=0
             fi
         else
-            echo "❌ C# compilation failed"
+            echo "✗ C# compilation failed"
             HAS_DOTNET=0
         fi
     fi
 fi
 echo ""
+
+# Arrays to store results for ranking
+declare -a LANG_NAMES
+declare -a LANG_TIMES
+declare -A ALL_RESULTS  # Store all results for summary table
+RESULT_COUNT=0
 
 # Run benchmarks
 run_benchmark() {
@@ -166,27 +193,44 @@ run_benchmark() {
     local total_time=0
     for run in 1 2 3; do
         # Use GNU time if available, otherwise use built-in time
-        if command -v gtime &> /dev/null; then
+        if command -v /usr/bin/time &> /dev/null; then
+            # Linux with GNU time - use more precision
+            local result=$(/usr/bin/time -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
+        elif command -v gtime &> /dev/null; then
             # macOS with GNU time
             local result=$(gtime -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
-        elif command -v /usr/bin/time &> /dev/null; then
-            # Linux
-            local result=$(/usr/bin/time -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         else
-            # Fallback to bash time
+            # Fallback to bash time with nanosecond precision
             local start=$(date +%s%N)
             $cmd "$file" > /dev/null 2>&1
             local end=$(date +%s%N)
-            local result=$(echo "scale=3; ($end - $start) / 1000000000" | bc)
+            local result=$(echo "scale=6; ($end - $start) / 1000000000" | bc)
         fi
-        total_time=$(echo "$total_time + $result" | bc)
-        echo -n "    Run $run: ${result}s"
-        echo ""
+        
+        # Ensure minimum value to avoid zero
+        if (( $(echo "$result < 0.001" | bc -l) )); then
+            result="0.001"
+        fi
+        
+        total_time=$(echo "scale=6; $total_time + $result" | bc)
+        printf "    Run %d: %.3fs\n" "$run" "$result"
     done
     
-    local avg_time=$(echo "scale=3; $total_time / 3" | bc)
+    local avg_time=$(echo "scale=6; $total_time / 3" | bc)
+    # Format to 3 decimal places for display
+    avg_time=$(printf "%.3f" "$avg_time")
     echo "    Average: ${avg_time}s"
     echo ""
+    
+    # Store results for ranking (only for first test file)
+    if [[ "$file" == "${TEST_FILES[0]}" ]]; then
+        LANG_NAMES[RESULT_COUNT]="$lang"
+        LANG_TIMES[RESULT_COUNT]="$avg_time"
+        RESULT_COUNT=$((RESULT_COUNT + 1))
+    fi
+    
+    # Store all results for summary table
+    ALL_RESULTS["${lang}:${file}"]="$avg_time"
 }
 
 # Main benchmark loop
@@ -201,17 +245,17 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
         run_benchmark "C" "./wordcount_c" "$TEST_FILE"
     fi
     
-    if [ "$HAS_RUST" = "1" ]; then
+    if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
         run_benchmark "Rust" "./wordcount_rust" "$TEST_FILE"
     fi
     
-    if [ "$HAS_GO" = "1" ]; then
+    if [ "$HAS_GO" = "1" ] && [ -f "wordcount_go" ]; then
         run_benchmark "Go" "./wordcount_go" "$TEST_FILE"
     fi
     
     if [ "$HAS_DOTNET" = "1" ]; then
-        if [ -f "bin/Release/net6.0/WordCount" ]; then
-            run_benchmark "C# (.NET)" "./bin/Release/net6.0/WordCount" "$TEST_FILE"
+        if [ -f "bin/Release/net8.0/WordCount" ]; then
+            run_benchmark "C# (.NET)" "./bin/Release/net8.0/WordCount" "$TEST_FILE"
         elif [ -f "wordcount_cs.exe" ]; then
             run_benchmark "C# (Mono)" "./wordcount_cs.exe" "$TEST_FILE"
         fi
@@ -238,23 +282,106 @@ for f in *_results.txt; do
 done
 echo ""
 
-# Summary
+# Summary with actual results
 echo "========================================="
 echo "Benchmark Complete!"
 echo "========================================="
 echo ""
-echo "Performance Ranking (typical):"
-echo "1. C         - Fastest (baseline)"
-echo "2. Rust      - ~1.2x slower than C"
-echo "3. Go        - ~1.5x slower than C"
-echo "4. C# (.NET) - ~3x slower than C"
-echo "5. JavaScript- ~7x slower than C"
-echo "6. PHP       - ~10x slower than C"
-echo ""
-echo "Key observations:"
-echo "- Compiled languages (C, Rust, C#) significantly outperform interpreted ones"
-echo "- Memory usage varies by 10x between C and interpreted languages"
-echo "- Output files contain detailed word frequency analysis"
+
+# Sort and display actual performance ranking
+if [ $RESULT_COUNT -gt 0 ]; then
+    echo "Actual Performance Ranking (${TEST_FILES[0]}):"
+    echo "----------------------------------------"
+    
+    # Create temporary file for sorting
+    TEMP_RESULTS=$(mktemp)
+    for ((i=0; i<RESULT_COUNT; i++)); do
+        echo "${LANG_TIMES[$i]} ${LANG_NAMES[$i]}" >> "$TEMP_RESULTS"
+    done
+    
+    # Sort by time and display with ranking
+    RANK=1
+    BASELINE_TIME=""
+    FASTEST_LANG=""
+    sort -n "$TEMP_RESULTS" | while read TIME LANG; do
+        if [ -z "$BASELINE_TIME" ]; then
+            BASELINE_TIME="$TIME"
+            FASTEST_LANG="$LANG"
+            printf "%d. %-20s %8.3fs (baseline)\n" "$RANK" "$LANG" "$TIME"
+        else
+            # Avoid divide by zero
+            if (( $(echo "$BASELINE_TIME > 0" | bc -l) )); then
+                SLOWDOWN=$(echo "scale=1; $TIME / $BASELINE_TIME" | bc)
+                printf "%d. %-20s %8.3fs (%.1fx slower)\n" "$RANK" "$LANG" "$TIME" "$SLOWDOWN"
+            else
+                printf "%d. %-20s %8.3fs\n" "$RANK" "$LANG" "$TIME"
+            fi
+        fi
+        RANK=$((RANK + 1))
+    done
+    
+    echo ""
+    
+    # Show comparison table if multiple files were tested
+    if [ ${#TEST_FILES[@]} -gt 1 ]; then
+        echo "Performance Across File Sizes:"
+        echo "----------------------------------------"
+        printf "%-20s" "Language"
+        for FILE in "${TEST_FILES[@]}"; do
+            SIZE=$(du -h "$FILE" | cut -f1)
+            printf " %10s" "$SIZE"
+        done
+        echo ""
+        echo "----------------------------------------"
+        
+        # Display results for each language
+        for ((i=0; i<RESULT_COUNT; i++)); do
+            LANG="${LANG_NAMES[$i]}"
+            printf "%-20s" "$LANG"
+            for FILE in "${TEST_FILES[@]}"; do
+                TIME="${ALL_RESULTS["${LANG}:${FILE}"]}"
+                if [ -n "$TIME" ]; then
+                    printf " %10.3fs" "$TIME"
+                else
+                    printf " %10s" "N/A"
+                fi
+            done
+            echo ""
+        done
+        echo ""
+    fi
+    
+    # Calculate performance spread
+    if [ $RESULT_COUNT -gt 1 ]; then
+        FASTEST="${LANG_TIMES[0]}"
+        SLOWEST="${LANG_TIMES[0]}"
+        for ((i=1; i<RESULT_COUNT; i++)); do
+            if (( $(echo "${LANG_TIMES[$i]} < $FASTEST" | bc -l) )); then
+                FASTEST="${LANG_TIMES[$i]}"
+            fi
+            if (( $(echo "${LANG_TIMES[$i]} > $SLOWEST" | bc -l) )); then
+                SLOWEST="${LANG_TIMES[$i]}"
+            fi
+        done
+        
+        if (( $(echo "$FASTEST > 0" | bc -l) )); then
+            SPREAD=$(echo "scale=1; $SLOWEST / $FASTEST" | bc)
+            echo "Key Insights:"
+            echo "- Performance spread: ${SPREAD}x between fastest and slowest"
+            echo "- Test system: $(uname -s) on $(uname -m)"
+            echo "- CPU: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)"
+        else
+            echo "Key Insights:"
+            echo "- Test system: $(uname -s) on $(uname -m)"
+            echo "- CPU: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)"
+        fi
+    fi
+    
+    # Clean up temp file
+    rm -f "$TEMP_RESULTS"
+else
+    echo "No benchmark results collected."
+fi
 echo ""
 echo "To get detailed statistics, run each program individually:"
 if [ "$HAS_GCC" = "1" ]; then

@@ -82,7 +82,7 @@ fn main() -> io::Result<()> {
     // Output results
     println!("\n=== Top 10 Most Frequent Words ===");
     for (index, (word, count)) in sorted.iter().take(10).enumerate() {
-        println!("{:2}. {:<15} {:>8}", index + 1, word, format_number(*count));
+        println!("{:2}. {:<15} {:>8}", index + 1, word, format_number(**count));
     }
     
     println!("\n=== Statistics ===");
@@ -90,8 +90,7 @@ fn main() -> io::Result<()> {
     println!("Total words:     {}", format_number(total_words as u32));
     println!("Unique words:    {}", format_number(counts.len() as u32));
     println!("Execution time:  {:.2} ms", execution_time);
-    println!("Rust version:    {}", env!("RUSTC_VERSION"));
-    
+
     println!("\nCompiled with: rustc -O (optimizations enabled)");
     
     // Write results to output file
@@ -160,26 +159,3 @@ fn write_output_file(
     println!("\nResults written to: {}", output_filename);
     Ok(())
 }
-
-/**
- * Performance notes:
- * - HashMap::with_capacity() reduces rehashing overhead
- * - split_whitespace() is faster than regex for simple tokenization
- * - sort_unstable_by() is faster when stability isn't needed
- * - Building with -O flag enables all optimizations
- * 
- * For even better performance:
- * - Use rustc -C opt-level=3 -C target-cpu=native wordcount.rs
- * - Consider using FxHashMap or AHashMap (faster hash functions)
- * - For huge files, use BufReader with buffered reading
- * - Use rayon for parallel processing on multi-core systems
- * 
- * Advanced optimizations (requires dependencies):
- * - cargo build --release (if using Cargo)
- * - Use memmap2 for memory-mapped files
- * - Use ahash for faster hashing
- * - Use rayon for parallelization
- */
-
-// To show Rust version at compile time, build with:
-// RUSTC_VERSION=$(rustc --version | cut -d' ' -f2) rustc -O wordcount.rs
