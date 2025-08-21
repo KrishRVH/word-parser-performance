@@ -1,19 +1,16 @@
-// WordCount.cs
+// WordCount.cs - OPTIMIZED VERSION
 /**
- * Word Frequency Counter - C# (.NET) Implementation
+ * Word Frequency Counter - C# (.NET) Implementation (OPTIMIZED)
  * 
- * Optimized for performance while maintaining readability.
- * Best practices applied:
- * - Dictionary with initial capacity for better performance
- * - StringBuilder for efficient string operations
- * - Compiled regex with RegexOptions.Compiled
- * - LINQ optimizations with proper ordering
- * - Parallel processing option for large files
+ * Major optimizations:
+ * - Manual word extraction instead of regex
+ * - Process characters directly without ToLowerInvariant() on entire file
+ * - StringBuilder pooling for word building
+ * - Optimized dictionary operations
+ * - Minimal allocations
  * 
  * Build: dotnet build -c Release
- * Or: csc -optimize+ -out:wordcount_cs.exe WordCount.cs
  * Usage: dotnet run --configuration Release [filename]
- * Or: wordcount_cs.exe [filename]
  */
 
 using System;
@@ -22,16 +19,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.RegularExpressions;
 
 class WordCount
 {
-    // Pre-compiled regex for better performance
-    private static readonly Regex WordRegex = new Regex(
-        @"\b[a-z]+\b", 
-        RegexOptions.Compiled | RegexOptions.IgnoreCase
-    );
-    
     static void Main(string[] args)
     {
         // Get filename from command line or use default
@@ -41,7 +31,7 @@ class WordCount
         if (!File.Exists(filename))
         {
             Console.Error.WriteLine($"Error: File '{filename}' not found");
-            Console.WriteLine("Usage: wordcount_cs.exe [filename]");
+            Console.WriteLine("Usage: WordCount.exe [filename]");
             Console.WriteLine("\nTo create a test file:");
             Console.WriteLine("curl https://www.gutenberg.org/files/2701/2701-0.txt -o book.txt");
             Environment.Exit(1);
@@ -55,43 +45,14 @@ class WordCount
         
         try
         {
-            // Read entire file (fastest for files that fit in memory)
-            string text = File.ReadAllText(filename);
+            // Process file and count words
+            var (counts, totalWords) = ProcessFileOptimized(filename);
             
-            // Convert to lowercase for case-insensitive counting
-            text = text.ToLowerInvariant();
-            
-            // Extract all words using pre-compiled regex
-            MatchCollection matches = WordRegex.Matches(text);
-            
-            if (matches.Count == 0)
-            {
-                Console.WriteLine("No words found in file");
-                Environment.Exit(0);
-            }
-            
-            // Count word frequencies using Dictionary with initial capacity
-            // Estimate ~10,000 unique words for a typical book
-            var counts = new Dictionary<string, int>(10000);
-            
-            foreach (Match match in matches)
-            {
-                string word = match.Value;
-                if (counts.ContainsKey(word))
-                {
-                    counts[word]++;
-                }
-                else
-                {
-                    counts[word] = 1;
-                }
-            }
-            
-            // Sort by frequency (descending) using LINQ
+            // Sort by frequency (descending) - optimize by taking only what we need
             var sorted = counts
                 .OrderByDescending(kvp => kvp.Value)
-                .ThenBy(kvp => kvp.Key)  // Secondary sort by word for consistency
-                .Take(100)  // Take more than we need for the output file
+                .ThenBy(kvp => kvp.Key)
+                .Take(100)
                 .ToList();
             
             // Calculate statistics
@@ -111,29 +72,81 @@ class WordCount
             
             Console.WriteLine("\n=== Statistics ===");
             Console.WriteLine($"File size:       {fileSize:F2} MB");
-            Console.WriteLine($"Total words:     {matches.Count:N0}");
+            Console.WriteLine($"Total words:     {totalWords:N0}");
             Console.WriteLine($"Unique words:    {counts.Count:N0}");
             Console.WriteLine($"Execution time:  {executionTime:F2} ms");
             Console.WriteLine($"Memory used:     {memoryUsed:F2} MB");
             Console.WriteLine($".NET version:    {Environment.Version}");
             Console.WriteLine($"64-bit process:  {Environment.Is64BitProcess}");
+            Console.WriteLine($"Optimized:       YES");
             
             // Write results to output file
-            WriteOutputFile(filename, sorted, matches.Count, counts.Count, executionTime);
-            
-            // Performance tips
-            if (!IsOptimized())
-            {
-                Console.WriteLine("\nTip: Build with Release configuration for better performance:");
-                Console.WriteLine("     dotnet build -c Release");
-                Console.WriteLine("     dotnet run -c Release");
-            }
+            WriteOutputFile(filename, sorted, totalWords, counts.Count, executionTime);
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error processing file: {ex.Message}");
             Environment.Exit(1);
         }
+    }
+    
+    // Optimized file processing - manual tokenization
+    static (Dictionary<string, int> counts, int totalWords) ProcessFileOptimized(string filename)
+    {
+        var counts = new Dictionary<string, int>(10000); // Pre-size for ~10k unique words
+        int totalWords = 0;
+        
+        // Read file with buffering
+        using (var reader = new StreamReader(filename, Encoding.UTF8, true, 65536)) // 64KB buffer
+        {
+            var wordBuilder = new StringBuilder(100);
+            int c;
+            
+            while ((c = reader.Read()) != -1)
+            {
+                char ch = (char)c;
+                
+                if (char.IsLetter(ch))
+                {
+                    // Convert to lowercase inline and append
+                    wordBuilder.Append(char.ToLowerInvariant(ch));
+                }
+                else if (wordBuilder.Length > 0)
+                {
+                    // End of word - add to dictionary
+                    string word = wordBuilder.ToString();
+                    
+                    if (counts.TryGetValue(word, out int count))
+                    {
+                        counts[word] = count + 1;
+                    }
+                    else
+                    {
+                        counts[word] = 1;
+                    }
+                    
+                    totalWords++;
+                    wordBuilder.Clear();
+                }
+            }
+            
+            // Handle last word if file doesn't end with non-letter
+            if (wordBuilder.Length > 0)
+            {
+                string word = wordBuilder.ToString();
+                if (counts.TryGetValue(word, out int count))
+                {
+                    counts[word] = count + 1;
+                }
+                else
+                {
+                    counts[word] = 1;
+                }
+                totalWords++;
+            }
+        }
+        
+        return (counts, totalWords);
     }
     
     static void WriteOutputFile(string inputFile, List<KeyValuePair<string, int>> sorted, 
@@ -143,7 +156,7 @@ class WordCount
         
         using (var writer = new StreamWriter(outputFile))
         {
-            writer.WriteLine("Word Frequency Analysis - C# Implementation");
+            writer.WriteLine("Word Frequency Analysis - C# Implementation (Optimized)");
             writer.WriteLine($"Input file: {inputFile}");
             writer.WriteLine($"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             writer.WriteLine($"Execution time: {executionTime:F2} ms");
@@ -165,34 +178,17 @@ class WordCount
         
         Console.WriteLine($"\nResults written to: {outputFile}");
     }
-    
-    static bool IsOptimized()
-    {
-        #if DEBUG
-            return false;
-        #else
-            return true;
-        #endif
-    }
 }
 
 /**
- * Performance notes:
- * - Dictionary with initial capacity reduces rehashing
- * - Regex.Compiled flag pre-compiles the regex to IL
- * - ToLowerInvariant() is faster than ToLower() for ASCII
- * - LINQ OrderByDescending is optimized in .NET
- * - Reading entire file is fastest for < 100MB files
+ * Optimization changes from original:
+ * 1. Manual character-by-character processing instead of regex
+ * 2. ToLowerInvariant() on individual chars, not entire file
+ * 3. StringBuilder with pre-allocated capacity
+ * 4. StreamReader with large buffer (64KB)
+ * 5. TryGetValue pattern for dictionary updates
+ * 6. Pre-sized dictionary to reduce rehashing
  * 
- * For even better performance:
- * - Use ReadOnlySpan<char> for zero-allocation string processing
- * - Use ArrayPool<T> for temporary buffers
- * - Use Parallel.ForEach for multi-core processing on large files
- * - Consider memory-mapped files for huge files
- * - Use .NET 8+ for best performance
- * 
- * Build for maximum performance:
- * dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
- * dotnet publish -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true
- * dotnet publish -c Release -r osx-x64 --self-contained -p:PublishSingleFile=true
+ * Expected performance improvement: 3-5x faster
+ * Should now be only 2-3x slower than C, not 12x
  */
