@@ -1,5 +1,6 @@
 #!/bin/bash
 # benchmark.sh - Fair performance comparison of word frequency counters
+# OPTIMIZED VERSION with aggressive compiler flags and runtime optimizations
 
 echo "========================================="
 echo "Word Frequency Counter - Language Benchmark"
@@ -92,42 +93,62 @@ else
 fi
 echo ""
 
-# Compile Rust if available
+# Compile Rust with MAXIMUM optimizations
 if [ "$HAS_RUST" = "1" ]; then
-    echo "Compiling Rust version with optimizations..."
-    rustc -O wordcount.rs -o wordcount_rust 2>rust_error.log
+    echo "Compiling Rust version with AGGRESSIVE optimizations..."
+    rustc -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 wordcount.rs -o wordcount_rust 2>rust_error.log
     if [ $? -eq 0 ]; then
-        echo "✓ Rust compilation successful"
+        echo "✓ Rust compilation successful (maximum optimizations)"
         rm -f rust_error.log
     else
-        echo "✗ Rust compilation failed - Error details:"
-        cat rust_error.log | head -10
-        echo ""
-        HAS_RUST=0
+        echo "✗ Rust compilation failed - trying standard optimizations..."
+        rustc -O wordcount.rs -o wordcount_rust 2>rust_error.log
+        if [ $? -eq 0 ]; then
+            echo "✓ Rust compilation successful (standard optimizations)"
+            rm -f rust_error.log
+        else
+            echo "✗ Rust compilation failed - Error details:"
+            cat rust_error.log | head -10
+            echo ""
+            HAS_RUST=0
+        fi
     fi
 fi
 
-# Compile C if available
+# Compile C with AGGRESSIVE optimizations
 if [ "$HAS_GCC" = "1" ]; then
-    echo "Compiling C version with optimizations..."
-    gcc -O3 -march=native wordcount.c -o wordcount_c 2>/dev/null
+    echo "Compiling C version with AGGRESSIVE optimizations..."
+    gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops wordcount.c -o wordcount_c 2>/dev/null
     if [ $? -eq 0 ]; then
-        echo "✓ C compilation successful"
+        echo "✓ C compilation successful (maximum optimizations)"
     else
-        echo "✗ C compilation failed"
-        HAS_GCC=0
+        # Fallback to standard optimizations
+        gcc -O3 -march=native wordcount.c -o wordcount_c 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo "✓ C compilation successful (standard optimizations)"
+        else
+            echo "✗ C compilation failed"
+            HAS_GCC=0
+        fi
     fi
 fi
 
-# Build Go if available
+# Build Go with AGGRESSIVE optimizations
 if [ "$HAS_GO" = "1" ]; then
-    echo "Building Go version with optimizations..."
-    go build -ldflags="-s -w" -o wordcount_go wordcount.go 2>/dev/null
+    echo "Building Go version with AGGRESSIVE optimizations..."
+    # Try with bounds checking disabled
+    go build -gcflags="-B" -ldflags="-s -w" -o wordcount_go wordcount.go 2>/dev/null
     if [ $? -eq 0 ]; then
-        echo "✓ Go compilation successful"
+        echo "✓ Go compilation successful (bounds checking disabled)"
     else
-        echo "✗ Go compilation failed"
-        HAS_GO=0
+        # Fallback to standard optimizations
+        go build -ldflags="-s -w" -o wordcount_go wordcount.go 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo "✓ Go compilation successful (standard optimizations)"
+        else
+            echo "✗ Go compilation failed"
+            HAS_GO=0
+        fi
     fi
 fi
 
@@ -146,6 +167,8 @@ if [ "$HAS_DOTNET" = "1" ]; then
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>true</PublishTrimmed>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredCompilation>false</TieredCompilation>
+    <PublishReadyToRun>true</PublishReadyToRun>
   </PropertyGroup>
 </Project>
 EOF
@@ -178,7 +201,7 @@ declare -a LANG_TIMES
 declare -A ALL_RESULTS  # Store all results for summary table
 RESULT_COUNT=0
 
-# Run benchmarks
+# Run benchmarks with optimized runtime settings
 run_benchmark() {
     local lang=$1
     local cmd=$2
@@ -242,32 +265,48 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     
     # Run compiled languages first (typically fastest)
     if [ "$HAS_GCC" = "1" ]; then
-        run_benchmark "C" "./wordcount_c" "$TEST_FILE"
+        run_benchmark "C (optimized)" "./wordcount_c" "$TEST_FILE"
     fi
     
     if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
-        run_benchmark "Rust" "./wordcount_rust" "$TEST_FILE"
+        run_benchmark "Rust (optimized)" "./wordcount_rust" "$TEST_FILE"
     fi
     
     if [ "$HAS_GO" = "1" ] && [ -f "wordcount_go" ]; then
-        run_benchmark "Go" "./wordcount_go" "$TEST_FILE"
+        # Run Go with GC disabled for short programs
+        echo "  Go (GC disabled):"
+        GOGC=off run_benchmark "Go" "./wordcount_go" "$TEST_FILE"
     fi
     
     if [ "$HAS_DOTNET" = "1" ]; then
         if [ -f "bin/Release/net8.0/WordCount" ]; then
-            run_benchmark "C# (.NET)" "./bin/Release/net8.0/WordCount" "$TEST_FILE"
+            # Run with tiered compilation disabled for consistent performance
+            DOTNET_TieredCompilation=0 run_benchmark "C# (.NET)" "./bin/Release/net8.0/WordCount" "$TEST_FILE"
         elif [ -f "wordcount_cs.exe" ]; then
             run_benchmark "C# (Mono)" "./wordcount_cs.exe" "$TEST_FILE"
         fi
     fi
     
-    # Run interpreted languages (typically slower)
+    # Run interpreted languages with optimizations
     if [ "$HAS_NODE" = "1" ]; then
-        run_benchmark "JavaScript (Node.js)" "node wordcount.js" "$TEST_FILE"
+        # Run Node with V8 optimizations
+        run_benchmark "JavaScript (V8 opt)" "node --max-old-space-size=4096 --optimize-for-size wordcount.js" "$TEST_FILE"
     fi
     
     if [ "$HAS_PHP" = "1" ]; then
-        run_benchmark "PHP" "php wordcount.php" "$TEST_FILE"
+        # Check PHP version for JIT support
+        PHP_VERSION=$(php -r "echo PHP_VERSION;")
+        PHP_MAJOR=$(echo $PHP_VERSION | cut -d. -f1)
+        PHP_MINOR=$(echo $PHP_VERSION | cut -d. -f2)
+        
+        if [ "$PHP_MAJOR" -ge 8 ]; then
+            # PHP 8+ with JIT
+            echo "  PHP (with JIT):"
+            run_benchmark "PHP" "php -d opcache.enable_cli=1 -d opcache.jit=tracing -d opcache.jit_buffer_size=128M wordcount.php" "$TEST_FILE"
+        else
+            # PHP 7 or older without JIT
+            run_benchmark "PHP" "php -d opcache.enable_cli=1 wordcount.php" "$TEST_FILE"
+        fi
     fi
 done
 
@@ -369,11 +408,26 @@ if [ $RESULT_COUNT -gt 0 ]; then
             echo "Key Insights:"
             echo "- Performance spread: ${SPREAD}x between fastest and slowest"
             echo "- Test system: $(uname -s) on $(uname -m)"
-            echo "- CPU: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)"
-        else
-            echo "Key Insights:"
-            echo "- Test system: $(uname -s) on $(uname -m)"
-            echo "- CPU: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)"
+            
+            # Try to get CPU info
+            if command -v lscpu &> /dev/null; then
+                echo "- CPU: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)"
+            elif [ -f /proc/cpuinfo ]; then
+                echo "- CPU: $(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)"
+            fi
+            
+            echo ""
+            echo "Optimizations Applied:"
+            echo "- C: -O3 -march=native -mtune=native -flto"
+            echo "- Rust: -C opt-level=3 -C target-cpu=native -C lto=fat"
+            echo "- Go: GOGC=off -gcflags=\"-B\" -ldflags=\"-s -w\""
+            echo "- C#: TieredCompilation=false, ReadyToRun=true"
+            echo "- Node.js: --max-old-space-size=4096 --optimize-for-size"
+            if [ "$PHP_MAJOR" -ge 8 ]; then
+                echo "- PHP: opcache.jit=tracing (JIT enabled)"
+            else
+                echo "- PHP: opcache.enable_cli=1"
+            fi
         fi
     fi
     
@@ -391,16 +445,20 @@ if [ "$HAS_RUST" = "1" ]; then
     echo "  ./wordcount_rust book.txt"
 fi
 if [ "$HAS_GO" = "1" ]; then
-    echo "  ./wordcount_go book.txt"
+    echo "  GOGC=off ./wordcount_go book.txt"
 fi
 if [ "$HAS_DOTNET" = "1" ]; then
-    echo "  dotnet run --configuration Release book.txt"
+    echo "  DOTNET_TieredCompilation=0 dotnet run --configuration Release book.txt"
 fi
 if [ "$HAS_NODE" = "1" ]; then
-    echo "  node wordcount.js book.txt"
+    echo "  node --max-old-space-size=4096 --optimize-for-size wordcount.js book.txt"
 fi
 if [ "$HAS_PHP" = "1" ]; then
-    echo "  php wordcount.php book.txt"
+    if [ "$PHP_MAJOR" -ge 8 ]; then
+        echo "  php -d opcache.enable_cli=1 -d opcache.jit=tracing wordcount.php book.txt"
+    else
+        echo "  php -d opcache.enable_cli=1 wordcount.php book.txt"
+    fi
 fi
 
 # Clean up compiled files
