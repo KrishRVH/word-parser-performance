@@ -1,10 +1,40 @@
 #!/bin/bash
-# benchmark.sh - Fair performance comparison of word frequency counters
-# OPTIMIZED VERSION with aggressive compiler flags and runtime optimizations
+# benchmark.sh - Performance comparison of word frequency counters
+# Usage: ./bench.sh [--validate] [--runs=N]
+
+# Parse command line arguments
+VALIDATE=0
+NUM_RUNS=3
+for arg in "$@"; do
+    case $arg in
+        --validate)
+            VALIDATE=1
+            shift
+            ;;
+        --runs=*)
+            NUM_RUNS="${arg#*=}"
+            shift
+            ;;
+        --help)
+            echo "Usage: $0 [--validate] [--runs=N]"
+            echo "  --validate  Verify all implementations produce the same results"
+            echo "  --runs=N    Number of benchmark runs (default: 3)"
+            exit 0
+            ;;
+    esac
+done
 
 echo "========================================="
 echo "Word Frequency Counter - Language Benchmark"
 echo "========================================="
+echo ""
+
+if [ $VALIDATE -eq 1 ]; then
+    echo "Mode: Benchmark with validation"
+else
+    echo "Mode: Benchmark only"
+fi
+echo "Runs per test: $NUM_RUNS"
 echo ""
 
 # Check dependencies
@@ -24,7 +54,6 @@ check_dependency() {
 }
 
 echo "Checking dependencies..."
-# Fixed: Now properly setting variables without capturing echo output
 check_dependency node
 HAS_NODE=$?; HAS_NODE=$((1-HAS_NODE))
 
@@ -93,69 +122,48 @@ else
 fi
 echo ""
 
-# Compile Rust with MAXIMUM optimizations
+# Compile Rust
 if [ "$HAS_RUST" = "1" ]; then
-    echo "Compiling Rust version with AGGRESSIVE optimizations..."
+    echo "Compiling Rust version..."
     rustc -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 wordcount.rs -o wordcount_rust 2>rust_error.log
     if [ $? -eq 0 ]; then
-        echo "✓ Rust compilation successful (maximum optimizations)"
+        echo "✓ Rust compilation successful"
         rm -f rust_error.log
     else
-        echo "✗ Rust compilation failed - trying standard optimizations..."
-        rustc -O wordcount.rs -o wordcount_rust 2>rust_error.log
-        if [ $? -eq 0 ]; then
-            echo "✓ Rust compilation successful (standard optimizations)"
-            rm -f rust_error.log
-        else
-            echo "✗ Rust compilation failed - Error details:"
-            cat rust_error.log | head -10
-            echo ""
-            HAS_RUST=0
-        fi
+        echo "✗ Rust compilation failed"
+        cat rust_error.log | head -10
+        echo ""
+        HAS_RUST=0
     fi
 fi
 
-# Compile C with AGGRESSIVE optimizations
+# Compile C
 if [ "$HAS_GCC" = "1" ]; then
-    echo "Compiling C version with AGGRESSIVE optimizations..."
+    echo "Compiling C version..."
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops wordcount.c -o wordcount_c 2>/dev/null
     if [ $? -eq 0 ]; then
-        echo "✓ C compilation successful (maximum optimizations)"
+        echo "✓ C compilation successful"
     else
-        # Fallback to standard optimizations
-        gcc -O3 -march=native wordcount.c -o wordcount_c 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "✓ C compilation successful (standard optimizations)"
-        else
-            echo "✗ C compilation failed"
-            HAS_GCC=0
-        fi
+        echo "✗ C compilation failed"
+        HAS_GCC=0
     fi
 fi
 
-# Build Go with AGGRESSIVE optimizations
+# Build Go
 if [ "$HAS_GO" = "1" ]; then
-    echo "Building Go version with AGGRESSIVE optimizations..."
-    # Try with bounds checking disabled
+    echo "Building Go version..."
     go build -gcflags="-B" -ldflags="-s -w" -o wordcount_go wordcount.go 2>/dev/null
     if [ $? -eq 0 ]; then
-        echo "✓ Go compilation successful (bounds checking disabled)"
+        echo "✓ Go build successful"
     else
-        # Fallback to standard optimizations
-        go build -ldflags="-s -w" -o wordcount_go wordcount.go 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo "✓ Go compilation successful (standard optimizations)"
-        else
-            echo "✗ Go compilation failed"
-            HAS_GO=0
-        fi
+        echo "✗ Go build failed"
+        HAS_GO=0
     fi
 fi
 
-# Build C# if available
+# Build C#
 if [ "$HAS_DOTNET" = "1" ]; then
-    echo "Building C# version with optimizations..."
-    # Check if we need to create a project file
+    echo "Building C# version..."
     if [ ! -f "WordCount.csproj" ]; then
         cat > WordCount.csproj << 'EOF'
 <Project Sdk="Microsoft.NET.Sdk">
@@ -176,32 +184,134 @@ EOF
     
     dotnet build -c Release --nologo --verbosity quiet 2>/dev/null
     if [ $? -eq 0 ]; then
-        echo "✓ C# compilation successful"
+        echo "✓ C# build successful"
     else
-        # Try fallback with csc if available
-        if command -v csc &> /dev/null; then
-            csc -optimize+ -out:wordcount_cs.exe WordCount.cs 2>/dev/null
-            if [ $? -eq 0 ]; then
-                echo "✓ C# compilation successful (using csc)"
-            else
-                echo "✗ C# compilation failed"
-                HAS_DOTNET=0
-            fi
-        else
-            echo "✗ C# compilation failed"
-            HAS_DOTNET=0
-        fi
+        echo "✗ C# build failed"
+        HAS_DOTNET=0
     fi
 fi
 echo ""
 
+# Validation function
+validate_results() {
+    local file=$1
+    local base_name="${file%.txt}"
+    
+    echo "  Validating results for $file..."
+    
+    # Collect all result files for this input
+    declare -a result_files
+    declare -a languages
+    
+    if [ -f "${base_name}_c_results.txt" ]; then
+        result_files+=("${base_name}_c_results.txt")
+        languages+=("C")
+    fi
+    if [ -f "${base_name}_rust_optimized_results.txt" ]; then
+        result_files+=("${base_name}_rust_optimized_results.txt")
+        languages+=("Rust")
+    fi
+    if [ -f "${base_name}_go_results.txt" ]; then
+        result_files+=("${base_name}_go_results.txt")
+        languages+=("Go")
+    fi
+    if [ -f "${base_name}_csharp_results.txt" ]; then
+        result_files+=("${base_name}_csharp_results.txt")
+        languages+=("C#")
+    fi
+    if [ -f "${base_name}_javascript_results.txt" ]; then
+        result_files+=("${base_name}_javascript_results.txt")
+        languages+=("JavaScript")
+    fi
+    if [ -f "${base_name}_php_results.txt" ]; then
+        result_files+=("${base_name}_php_results.txt")
+        languages+=("PHP")
+    fi
+    
+    if [ ${#result_files[@]} -lt 2 ]; then
+        echo "    ⚠ Less than 2 result files found, skipping validation"
+        return
+    fi
+    
+    # Extract top 10 words and counts from each file
+    # More robust extraction that handles different formats
+    local temp_dir=$(mktemp -d)
+    local has_differences=0
+    declare -A differences
+    
+    for i in "${!result_files[@]}"; do
+        # Extract lines that look like rankings
+        # Handle formats like "1. word 1,234" or "1  word  1234"
+        grep -E '^\s*[0-9]+[\.\s]' "${result_files[$i]}" | \
+            head -10 | \
+            sed 's/[,]//g' | \
+            awk '{
+                # Find the word (second non-numeric field) and count (last numeric field)
+                word = ""
+                count = ""
+                for(i=1; i<=NF; i++) {
+                    if ($i ~ /^[0-9]+$/ && i > 1) {
+                        count = $i
+                    } else if ($i !~ /^[0-9]+\.?$/ && word == "") {
+                        word = $i
+                    }
+                }
+                if (word != "" && count != "") print word, count
+            }' | sort > "$temp_dir/results_$i.txt"
+    done
+    
+    # Check if all files have the same content
+    local reference_file="$temp_dir/results_0.txt"
+    local all_match=1
+    
+    for ((i=1; i<${#result_files[@]}; i++)); do
+        if ! cmp -s "$reference_file" "$temp_dir/results_$i.txt"; then
+            all_match=0
+            differences["${languages[$i]}"]=1
+        fi
+    done
+    
+    if [ $all_match -eq 1 ]; then
+        echo "    ✓ All implementations produce identical results"
+    else
+        echo "    ⚠ Results differ between implementations:"
+        
+        # Show which implementations differ
+        local matching_with_c=""
+        local different_from_c=""
+        
+        for ((i=1; i<${#languages[@]}; i++)); do
+            if cmp -s "$reference_file" "$temp_dir/results_$i.txt"; then
+                matching_with_c="$matching_with_c ${languages[$i]}"
+            else
+                different_from_c="$different_from_c ${languages[$i]}"
+            fi
+        done
+        
+        if [ -n "$matching_with_c" ]; then
+            echo "      Matching: C${matching_with_c}"
+        fi
+        if [ -n "$different_from_c" ]; then
+            echo "      Different:${different_from_c}"
+        fi
+        
+        echo "    Top 3 words from each implementation:"
+        for i in "${!languages[@]}"; do
+            local top3=$(head -3 "$temp_dir/results_$i.txt" | awk '{printf "%s(%s) ", $1, $2}')
+            printf "      %-15s %s\n" "${languages[$i]}:" "$top3"
+        done
+    fi
+    
+    rm -rf "$temp_dir"
+}
+
 # Arrays to store results for ranking
 declare -a LANG_NAMES
 declare -a LANG_TIMES
-declare -A ALL_RESULTS  # Store all results for summary table
+declare -A ALL_RESULTS
 RESULT_COUNT=0
 
-# Run benchmarks with optimized runtime settings
+# Run benchmarks
 run_benchmark() {
     local lang=$1
     local cmd=$2
@@ -212,15 +322,13 @@ run_benchmark() {
     # Warm-up run (not measured)
     $cmd "$file" > /dev/null 2>&1
     
-    # Actual benchmark (3 runs, take average)
+    # Actual benchmark (NUM_RUNS runs, take average)
     local total_time=0
-    for run in 1 2 3; do
+    for ((run=1; run<=NUM_RUNS; run++)); do
         # Use GNU time if available, otherwise use built-in time
         if command -v /usr/bin/time &> /dev/null; then
-            # Linux with GNU time - use more precision
             local result=$(/usr/bin/time -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         elif command -v gtime &> /dev/null; then
-            # macOS with GNU time
             local result=$(gtime -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         else
             # Fallback to bash time with nanosecond precision
@@ -239,7 +347,7 @@ run_benchmark() {
         printf "    Run %d: %.3fs\n" "$run" "$result"
     done
     
-    local avg_time=$(echo "scale=6; $total_time / 3" | bc)
+    local avg_time=$(echo "scale=6; $total_time / $NUM_RUNS" | bc)
     # Format to 3 decimal places for display
     avg_time=$(printf "%.3f" "$avg_time")
     echo "    Average: ${avg_time}s"
@@ -265,48 +373,50 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     
     # Run compiled languages first (typically fastest)
     if [ "$HAS_GCC" = "1" ]; then
-        run_benchmark "C (optimized)" "./wordcount_c" "$TEST_FILE"
+        run_benchmark "C" "./wordcount_c" "$TEST_FILE"
     fi
     
     if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
-        run_benchmark "Rust (optimized)" "./wordcount_rust" "$TEST_FILE"
+        run_benchmark "Rust" "./wordcount_rust" "$TEST_FILE"
     fi
     
     if [ "$HAS_GO" = "1" ] && [ -f "wordcount_go" ]; then
-        # Run Go with GC disabled for short programs
-        echo "  Go (GC disabled):"
-        GOGC=off run_benchmark "Go" "./wordcount_go" "$TEST_FILE"
+        export GOGC=off
+        run_benchmark "Go" "./wordcount_go" "$TEST_FILE"
+        unset GOGC
     fi
     
     if [ "$HAS_DOTNET" = "1" ]; then
         if [ -f "bin/Release/net8.0/WordCount" ]; then
-            # Run with tiered compilation disabled for consistent performance
             DOTNET_TieredCompilation=0 run_benchmark "C# (.NET)" "./bin/Release/net8.0/WordCount" "$TEST_FILE"
         elif [ -f "wordcount_cs.exe" ]; then
             run_benchmark "C# (Mono)" "./wordcount_cs.exe" "$TEST_FILE"
         fi
     fi
     
-    # Run interpreted languages with optimizations
+    # Run interpreted languages
     if [ "$HAS_NODE" = "1" ]; then
-        # Run Node with V8 optimizations
-        run_benchmark "JavaScript (V8 opt)" "node --max-old-space-size=4096 --optimize-for-size wordcount.js" "$TEST_FILE"
+        run_benchmark "JavaScript (Node.js)" "node --max-old-space-size=4096 --optimize-for-size wordcount.js" "$TEST_FILE"
     fi
     
     if [ "$HAS_PHP" = "1" ]; then
-        # Check PHP version for JIT support
-        PHP_VERSION=$(php -r "echo PHP_VERSION;")
-        PHP_MAJOR=$(echo $PHP_VERSION | cut -d. -f1)
-        PHP_MINOR=$(echo $PHP_VERSION | cut -d. -f2)
+        # Get file size in bytes
+        FILE_SIZE_BYTES=$(stat -c%s "$TEST_FILE" 2>/dev/null || stat -f%z "$TEST_FILE" 2>/dev/null)
         
-        if [ "$PHP_MAJOR" -ge 8 ]; then
-            # PHP 8+ with JIT
-            echo "  PHP (with JIT):"
+        # PHP strategy: Use JIT for files > 10MB
+        if [ "$FILE_SIZE_BYTES" -gt 10485760 ]; then
+            # Large file: JIT helps
             run_benchmark "PHP" "php -d opcache.enable_cli=1 -d opcache.jit=tracing -d opcache.jit_buffer_size=128M wordcount.php" "$TEST_FILE"
         else
-            # PHP 7 or older without JIT
-            run_benchmark "PHP" "php -d opcache.enable_cli=1 wordcount.php" "$TEST_FILE"
+            # Small file: JIT adds overhead
+            run_benchmark "PHP" "php wordcount.php" "$TEST_FILE"
         fi
+    fi
+    
+    # Validate results if requested
+    if [ $VALIDATE -eq 1 ]; then
+        validate_results "$TEST_FILE"
+        echo ""
     fi
 done
 
@@ -329,7 +439,7 @@ echo ""
 
 # Sort and display actual performance ranking
 if [ $RESULT_COUNT -gt 0 ]; then
-    echo "Actual Performance Ranking (${TEST_FILES[0]}):"
+    echo "Performance Ranking (${TEST_FILES[0]}):"
     echo "----------------------------------------"
     
     # Create temporary file for sorting
@@ -341,14 +451,11 @@ if [ $RESULT_COUNT -gt 0 ]; then
     # Sort by time and display with ranking
     RANK=1
     BASELINE_TIME=""
-    FASTEST_LANG=""
     sort -n "$TEMP_RESULTS" | while read TIME LANG; do
         if [ -z "$BASELINE_TIME" ]; then
             BASELINE_TIME="$TIME"
-            FASTEST_LANG="$LANG"
             printf "%d. %-20s %8.3fs (baseline)\n" "$RANK" "$LANG" "$TIME"
         else
-            # Avoid divide by zero
             if (( $(echo "$BASELINE_TIME > 0" | bc -l) )); then
                 SLOWDOWN=$(echo "scale=1; $TIME / $BASELINE_TIME" | bc)
                 printf "%d. %-20s %8.3fs (%.1fx slower)\n" "$RANK" "$LANG" "$TIME" "$SLOWDOWN"
@@ -415,19 +522,6 @@ if [ $RESULT_COUNT -gt 0 ]; then
             elif [ -f /proc/cpuinfo ]; then
                 echo "- CPU: $(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)"
             fi
-            
-            echo ""
-            echo "Optimizations Applied:"
-            echo "- C: -O3 -march=native -mtune=native -flto"
-            echo "- Rust: -C opt-level=3 -C target-cpu=native -C lto=fat"
-            echo "- Go: GOGC=off -gcflags=\"-B\" -ldflags=\"-s -w\""
-            echo "- C#: TieredCompilation=false, ReadyToRun=true"
-            echo "- Node.js: --max-old-space-size=4096 --optimize-for-size"
-            if [ "$PHP_MAJOR" -ge 8 ]; then
-                echo "- PHP: opcache.jit=tracing (JIT enabled)"
-            else
-                echo "- PHP: opcache.enable_cli=1"
-            fi
         fi
     fi
     
@@ -437,7 +531,8 @@ else
     echo "No benchmark results collected."
 fi
 echo ""
-echo "To get detailed statistics, run each program individually:"
+
+echo "To run individual tests:"
 if [ "$HAS_GCC" = "1" ]; then
     echo "  ./wordcount_c book.txt"
 fi
@@ -448,26 +543,30 @@ if [ "$HAS_GO" = "1" ]; then
     echo "  GOGC=off ./wordcount_go book.txt"
 fi
 if [ "$HAS_DOTNET" = "1" ]; then
-    echo "  DOTNET_TieredCompilation=0 dotnet run --configuration Release book.txt"
+    echo "  ./bin/Release/net8.0/WordCount book.txt"
 fi
 if [ "$HAS_NODE" = "1" ]; then
-    echo "  node --max-old-space-size=4096 --optimize-for-size wordcount.js book.txt"
+    echo "  node wordcount.js book.txt"
 fi
 if [ "$HAS_PHP" = "1" ]; then
-    if [ "$PHP_MAJOR" -ge 8 ]; then
-        echo "  php -d opcache.enable_cli=1 -d opcache.jit=tracing wordcount.php book.txt"
-    else
-        echo "  php -d opcache.enable_cli=1 wordcount.php book.txt"
-    fi
+    echo "  php wordcount.php book.txt"
 fi
 
-# Clean up compiled files
+# Clean up compiled files and test files
 echo ""
-echo "Clean up compiled files and build artifacts? (y/n)"
+echo "Clean up compiled files, test files, and build artifacts? (y/n)"
 read -r response
 if [[ "$response" =~ ^[Yy]$ ]]; then
+    # Remove compiled binaries
     rm -f wordcount_rust wordcount_c wordcount_go wordcount_cs.exe
     rm -rf bin obj
     rm -f WordCount.csproj
-    echo "✓ Cleaned up"
+    
+    # Remove test files
+    rm -f book.txt book_10mb.txt book_50mb.txt
+    
+    # Remove result files
+    rm -f *_results.txt
+    
+    echo "✓ Cleaned up all files"
 fi
