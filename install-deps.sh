@@ -1,9 +1,22 @@
 #!/bin/bash
 # install-deps.sh - Install all dependencies for the word count benchmark on WSL2/Ubuntu
+# Works with both bash and zsh
 
 echo "======================================"
 echo "Installing Dependencies for Benchmark"
 echo "======================================"
+echo ""
+
+# Detect the user's shell
+USER_SHELL=$(basename "$SHELL")
+if [ "$USER_SHELL" = "zsh" ]; then
+    SHELL_RC="$HOME/.zshrc"
+    echo "🐚 Detected shell: zsh"
+else
+    SHELL_RC="$HOME/.bashrc"
+    echo "🐚 Detected shell: bash"
+fi
+echo "   Config file: $SHELL_RC"
 echo ""
 
 # Update package list
@@ -28,8 +41,12 @@ sudo apt install -y bc
 # Install Node.js (via NodeSource repository for latest version)
 echo ""
 echo "📗 Installing Node.js..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
+if ! command -v node &> /dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    sudo apt install -y nodejs
+else
+    echo "   Node.js already installed: $(node --version)"
+fi
 
 # Install PHP
 echo ""
@@ -41,9 +58,17 @@ echo ""
 echo "🦀 Installing Rust..."
 if ! command -v rustc &> /dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    
+    # Add Rust to PATH for current session
     source "$HOME/.cargo/env"
+    
+    # Add Rust to appropriate shell config if not already there
+    if ! grep -q ".cargo/env" "$SHELL_RC"; then
+        echo 'source "$HOME/.cargo/env"' >> "$SHELL_RC"
+        echo "   Added Rust to $SHELL_RC"
+    fi
 else
-    echo "   Rust already installed"
+    echo "   Rust already installed: $(rustc --version)"
 fi
 
 # Install Go
@@ -56,13 +81,16 @@ if ! command -v go &> /dev/null; then
     sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
     rm go${GO_VERSION}.linux-amd64.tar.gz
     
-    # Add Go to PATH if not already there
-    if ! grep -q "/usr/local/go/bin" ~/.bashrc; then
-        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-    fi
+    # Add Go to PATH for current session
     export PATH=$PATH:/usr/local/go/bin
+    
+    # Add Go to appropriate shell config if not already there
+    if ! grep -q "/usr/local/go/bin" "$SHELL_RC"; then
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> "$SHELL_RC"
+        echo "   Added Go to $SHELL_RC"
+    fi
 else
-    echo "   Go already installed"
+    echo "   Go already installed: $(go version)"
 fi
 
 # Install .NET SDK
@@ -78,7 +106,7 @@ if ! command -v dotnet &> /dev/null; then
     sudo apt update
     sudo apt install -y dotnet-sdk-8.0
 else
-    echo "   .NET already installed"
+    echo "   .NET already installed: $(dotnet --version)"
 fi
 
 # Install time command (for better benchmarking)
@@ -93,18 +121,29 @@ echo "======================================"
 echo ""
 echo "Installed versions:"
 echo "-------------------"
-gcc --version | head -n1
-node --version | head -n1
-php --version | head -n1
-rustc --version
-go version
-dotnet --version
+gcc --version | head -n1 || echo "GCC not found"
+node --version 2>/dev/null || echo "Node.js not found"
+php --version | head -n1 || echo "PHP not found"
+rustc --version 2>/dev/null || echo "Rust not found - reload shell"
+go version 2>/dev/null || echo "Go not found - reload shell"
+dotnet --version 2>/dev/null || echo ".NET not found"
 echo ""
-echo "To run the benchmark:"
-echo "  1. Make sure all wordcount files are in the current directory"
-echo "  2. Run: chmod +x bench.sh"
-echo "  3. Run: ./bench.sh"
+echo "======================================"
+echo "Next steps:"
+echo "======================================"
 echo ""
-echo "Note: If Rust or Go were just installed, run:"
-echo "  source ~/.bashrc"
-echo "Or open a new terminal for PATH updates to take effect."
+echo "1. Reload your shell configuration:"
+if [ "$USER_SHELL" = "zsh" ]; then
+    echo "   source ~/.zshrc"
+else
+    echo "   source ~/.bashrc"
+fi
+echo "   Or simply open a new terminal"
+echo ""
+echo "2. Make the benchmark executable:"
+echo "   chmod +x bench.sh"
+echo ""
+echo "3. Run the benchmark:"
+echo "   ./bench.sh"
+echo ""
+echo "That's it! The benchmark will handle everything else."
