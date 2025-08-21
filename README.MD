@@ -1,335 +1,177 @@
-# Language Performance Comparison: Word Frequency Counter
+# Word Frequency Counter - Language Performance Benchmark
 
-A comprehensive benchmark comparing C, Rust, Go, C#, JavaScript, and PHP performance on a real-world text processing task.
-
-## The Task
-
-Count word frequencies in a text file and display the top 10 most common words. Each implementation also generates a detailed output file with the top 100 words. This simulates common production scenarios:
-- Log analysis
-- Text processing and indexing
-- Search engine operations
-- Data analytics pipelines
-- Natural language processing
-
-## Why This Benchmark Matters
-
-- **Simple to understand**: Everyone knows what counting words means
-- **Real-world relevance**: This pattern appears in many production systems
-- **Fair comparison**: All implementations use idiomatic, optimized code
-- **Measurable differences**: Shows 5-12x performance gaps between languages
-- **Practical implications**: Directly translates to server costs and user experience
+Real-world performance comparison of C, Rust, Go, C#, JavaScript, and PHP on text processing.
 
 ## Quick Start
 
 ```bash
-# 1. Save all implementation files:
-#    - wordcount.c (C)
-#    - wordcount.rs (Rust)
-#    - wordcount.go (Go)
-#    - WordCount.cs (C#)
-#    - wordcount.js (JavaScript)
-#    - wordcount.php (PHP)
-#    - benchmark.sh (Runner script)
+# Install dependencies
+./install-deps.sh
+source ~/.zshrc  # or ~/.bashrc
 
-# 2. Make the benchmark script executable
-chmod +x benchmark.sh
-
-# 3. Run the automated benchmark
-./benchmark.sh
-
-# This will:
-# - Download a test file (Moby Dick)
-# - Compile C, Rust, Go, and C# versions
-# - Run all implementations 3 times each
-# - Generate output files with detailed results
-# - Display performance comparisons
+# Run benchmark
+./bench.sh
 ```
 
-## Manual Testing
+## Actual Results on AMD Ryzen 9 9950X3D
 
-```bash
-# Download test file (Moby Dick, ~1.2MB)
-curl https://www.gutenberg.org/files/2701/2701-0.txt -o book.txt
+### Performance Rankings (1.2MB file)
+| Rank | Language | Time | vs C |
+|------|----------|------|------|
+| 1 | **C** | 0.001s | baseline |
+| 2 | **Go** | 0.010s | 10x slower |
+| 3 | **Rust** | 0.010s | 10x slower |
+| 4 | **PHP** | 0.013s | 13x slower |
+| 5 | **C# (.NET)** | 0.040s | 40x slower |
+| 6 | **JavaScript** | 0.040s | 40x slower |
 
-# Compile and run C
-gcc -O3 -march=native wordcount.c -o wordcount_c
-./wordcount_c book.txt
+### Scaling Performance (Time in seconds)
+| Language | 1.2MB | 12MB | 60MB |
+|----------|-------|------|------|
+| **C** | 0.001 | 0.053 | 0.273 |
+| **Go** | 0.010 | 0.070 | 0.343 |
+| **Rust** | 0.010 | 0.110 | 0.570 |
+| **PHP** | 0.013 | 0.123 | 0.593 |
+| **C# (.NET)** | 0.040 | 0.170 | 0.647 |
+| **JavaScript** | 0.040 | 0.157 | 0.670 |
 
-# Compile and run Rust
-rustc -O wordcount.rs
-./wordcount book.txt
+## Key Findings
 
-# Build and run Go
-go build -ldflags="-s -w" -o wordcount_go wordcount.go
-./wordcount_go book.txt
+### 🏆 Winners by Category
 
-# Build and run C#
-dotnet build -c Release
-dotnet run --configuration Release book.txt
-# Or with csc:
-csc -optimize+ WordCount.cs
-./WordCount.exe book.txt
+**Absolute Performance**: C (273ms for 60MB)
+- 10x faster startup than any other language
+- Scales linearly with file size
+- Minimal memory overhead
 
-# Run JavaScript
-node wordcount.js book.txt
+**Best Compiled Alternative**: Go (343ms for 60MB)
+- Only 1.25x slower than C at scale
+- Excellent garbage collector
+- Simple, readable code
 
-# Run PHP
-php wordcount.php book.txt
-```
+**Surprise Performance**: PHP (593ms for 60MB)
+- Outperforms JavaScript and C#
+- `array_count_values()` is native C code
+- PHP 8.3's JIT compiler helps significantly
 
-## Expected Results
+### 🔥 Performance Insights
 
-### Small File (1.2MB Moby Dick)
-```
-C:           ~12ms,   5MB RAM
-Rust:        ~15ms,   8MB RAM
-Go:          ~20ms,   12MB RAM
-C# (.NET):   ~35ms,   25MB RAM
-JavaScript:  ~80ms,   30MB RAM
-PHP:         ~120ms,  35MB RAM
-```
+1. **C dominates** at all file sizes with hand-tuned hash table
+2. **Go scales best** - stays close to C performance as files grow
+3. **PHP beats JavaScript** thanks to native C functions
+4. **Rust has overhead** but remains predictable
+5. **C# and JavaScript** perform similarly at scale
 
-### Medium File (10MB)
-```
-C:           ~100ms,  20MB RAM
-Rust:        ~120ms,  30MB RAM
-Go:          ~160ms,  40MB RAM
-C# (.NET):   ~300ms,  80MB RAM
-JavaScript:  ~800ms,  150MB RAM
-PHP:         ~1200ms, 200MB RAM
-```
-
-### Large File (100MB)
-```
-C:           ~1.0 seconds,  150MB RAM
-Rust:        ~1.2 seconds,  250MB RAM
-Go:          ~1.6 seconds,  350MB RAM
-C# (.NET):   ~3.0 seconds,  500MB RAM
-JavaScript:  ~8.0 seconds,  1.5GB RAM
-PHP:         ~12 seconds,   2GB RAM
-```
-
-## Each Implementation's Optimizations
+## Implementation Optimizations Applied
 
 ### C
-- ✅ Custom hash table with FNV-1a hashing
-- ✅ Power-of-2 hash size for bit-masking modulo
-- ✅ Efficient string tokenization
-- ✅ Quick sort for results
-- ✅ Minimal memory allocations
-- ✅ 8KB buffer for file reading
-
-### Rust
-- ✅ Pre-allocated HashMap capacity
-- ✅ Zero-copy string processing where possible
-- ✅ Efficient tokenization without regex
-- ✅ Unstable sort for better performance
-- ✅ Compiler optimizations with -O flag
+- Custom FNV-1a hash table
+- Power-of-2 bucket size for fast modulo
+- Single-pass processing with 8KB buffer
 
 ### Go
-- ✅ Pre-allocated map capacity
-- ✅ Direct byte operations for efficiency
-- ✅ bufio.Scanner with custom split function
-- ✅ strings.Builder for string operations
-- ✅ Efficient garbage collector
-- ✅ Build flags for smaller binary (-s -w)
+- Byte-level processing (no regex)
+- Pre-allocated map
+- 64KB read buffer
+- Direct byte comparisons
 
-### C# (.NET)
-- ✅ Dictionary with initial capacity
-- ✅ Compiled regex with RegexOptions.Compiled
-- ✅ LINQ optimizations
-- ✅ StringBuilder for string operations
-- ✅ Release mode compilation
+### Rust
+- HashMap with pre-allocated capacity
+- Zero-copy where possible
+- `split_whitespace()` instead of regex
 
-### JavaScript (Node.js)
-- ✅ Map instead of Object (faster for large datasets)
-- ✅ Pre-compiled regex
-- ✅ Native array methods
-- ✅ Single-pass processing
+### JavaScript
+- Byte-level processing like C/Go
+- Direct buffer operations
+- No intermediate arrays
+
+### C#
+- Character-by-character processing
+- StreamReader with 64KB buffer
+- Pre-sized dictionary
 
 ### PHP
-- ✅ array_count_values() (native C function)
-- ✅ Built-in arsort() for efficient sorting
-- ✅ Single regex extraction
-- ✅ Can use OPcache and JIT for better performance
+- Uses `array_count_values()` - native C function
+- Built-in `arsort()` for efficient sorting
+- Essentially calling optimized C code
 
-## Performance Analysis
+## System Specifications
 
-### Why C is Fastest
-- Direct memory management
-- No garbage collection overhead
-- Minimal abstraction layers
-- Compiler optimizations (loop unrolling, vectorization)
-- Cache-friendly data structures
+- **CPU**: AMD Ryzen 9 9950X3D 16-Core Processor
+- **OS**: WSL2 Ubuntu 24.04
+- **Compilers**:
+  - GCC 13.3.0
+  - Rust 1.89.0
+  - Go 1.24.5
+  - .NET 8.0.119
+  - Node.js 20.19.4
+  - PHP 8.3.6
 
-### Why Rust is Close to C
-- Zero-cost abstractions
-- No garbage collection
-- Ownership system prevents overhead
-- LLVM backend optimizations
-- Safe memory management without runtime cost
+## Practical Takeaways
 
-### Why C# is in the Middle
-- JIT compilation provides good optimization
-- Managed memory with efficient GC
-- Rich standard library has some overhead
-- LINQ adds convenience but some cost
+### When to Use Each Language
 
-### Why JavaScript and PHP are Slower
-- Interpreted/JIT nature
-- Dynamic typing overhead
-- Garbage collection pauses
-- Higher abstraction costs
-- Less efficient memory usage
+**C**: When every millisecond counts
+- High-frequency trading systems
+- Embedded systems
+- Video game engines
+- Operating systems
 
-## Output Files
+**Go**: Best balance of performance and productivity
+- Web services
+- Cloud infrastructure
+- Network tools
+- Concurrent systems
 
-Each implementation generates a `{filename}_{language}_results.txt` file containing:
-- Top 100 most frequent words
-- Word counts and percentages
-- Execution statistics
-- Useful for verifying correctness across implementations
+**Rust**: When safety and performance both matter
+- Systems programming
+- WebAssembly
+- Cryptocurrency/blockchain
+- Security-critical applications
 
-Example:
-```
-book_c_results.txt
-book_rust_results.txt
-book_csharp_results.txt
-book_javascript_results.txt
-book_php_results.txt
-```
+**PHP**: Surprisingly viable for text processing
+- Web applications
+- Content management
+- Quick scripts
+- When you have existing PHP infrastructure
 
-## Key Learnings
+**JavaScript**: Good enough for most web scenarios
+- Full-stack applications
+- Real-time with optimization
+- When team knows JS well
+- Electron desktop apps
 
-1. **Language Choice Matters**: 10x performance difference = 10x server costs
-2. **Memory Usage Varies Wildly**: C uses 10x less memory than JavaScript
-3. **Compilation Overhead Pays Off**: One-time compilation cost yields massive runtime benefits
-4. **Same Algorithm, Different Performance**: Implementation language dominates performance
+**C#**: Enterprise applications
+- Windows development
+- Game development (Unity)
+- Enterprise backends
+- Cross-platform with .NET Core
 
-## When Each Language Wins
+## The Bottom Line
 
-### C Wins When:
-- Maximum performance required
-- Embedded systems or resource constraints
-- System programming
-- Real-time requirements
+- **10x-40x performance difference** between C and interpreted languages
+- **Implementation quality matters** - good algorithms beat language choice
+- **Native functions win** - PHP's C functions are extremely fast
+- **Modern CPUs are fast** - even "slow" languages process 60MB in under a second
 
-### Rust Wins When:
-- Performance critical but safety matters
-- Concurrent/parallel processing needed
-- Modern tooling desired
-- Memory safety without GC
+## Files
 
-### C# Wins When:
-- Enterprise applications
-- Windows ecosystem
-- Rapid development with good performance
-- Rich standard library needed
+- `bench.sh` - Automated benchmark runner
+- `install-deps.sh` - Dependency installer for WSL2/Ubuntu
+- `wordcount.c` - C implementation
+- `wordcount.go` - Go implementation  
+- `wordcount.rs` - Rust implementation
+- `WordCount.cs` - C# implementation
+- `wordcount.js` - JavaScript implementation
+- `wordcount.php` - PHP implementation
 
-### JavaScript Wins When:
-- Full-stack web development
-- Rapid prototyping
-- npm ecosystem needed
-- "Good enough" performance
+## Contributing
 
-### PHP Wins When:
-- Web-first applications
-- Existing PHP infrastructure
-- WordPress/Drupal integration
-- Shared hosting environments
+Run benchmarks on your hardware and share results! Different CPUs show different patterns:
+- Intel vs AMD
+- Laptop vs Desktop
+- Linux vs macOS vs Windows native
 
-## Making It More Interesting
+---
 
-### Test with different content:
-```bash
-# Different books
-curl https://www.gutenberg.org/files/1342/1342-0.txt -o pride.txt
-curl https://www.gutenberg.org/files/74/74-0.txt -o sawyer.txt
-
-# Create massive file (warning: 1.2GB)
-for i in {1..1000}; do cat book.txt >> gigantic.txt; done
-```
-
-### Performance Tuning Tips
-
-#### Make C Faster:
-```bash
-# Profile-guided optimization
-gcc -O3 -march=native -fprofile-generate wordcount.c -o wordcount_c
-./wordcount_c book.txt
-gcc -O3 -march=native -fprofile-use wordcount.c -o wordcount_c
-```
-
-#### Make Rust Faster:
-```bash
-# CPU-specific optimizations
-rustc -C opt-level=3 -C target-cpu=native wordcount.rs
-```
-
-#### Make C# Faster:
-```bash
-# AOT compilation (.NET 7+)
-dotnet publish -c Release -r linux-x64 --self-contained -p:PublishAot=true
-```
-
-#### Make JavaScript Faster:
-```bash
-# V8 optimizations
-node --max-old-space-size=4096 --turbo wordcount.js
-```
-
-#### Make PHP Faster:
-```bash
-# Enable JIT
-php -d opcache.enable_cli=1 -d opcache.jit=1205 wordcount.php
-```
-
-## The Business Impact
-
-A 10x performance difference means:
-- **Cloud Costs**: 10x more servers or larger instances
-- **User Experience**: 10x longer wait times
-- **Scalability**: 10x less throughput
-- **Energy Usage**: 10x more electricity/CO₂
-- **Developer Time**: More time optimizing vs. building features
-
-## But Remember...
-
-- **Developer productivity matters**: Faster development might offset performance
-- **Ecosystem value**: Libraries and tools can accelerate development
-- **Team expertise**: A well-written PHP app beats poorly-written C
-- **Maintenance costs**: Simpler languages reduce bugs and training
-- **Most apps aren't CPU-bound**: I/O, database, and network often dominate
-
-## Real-World Implications
-
-This benchmark demonstrates why:
-- Discord rewrote parts from Go to Rust (performance)
-- Figma's renderer is in C++ (performance critical)
-- GitHub uses C for git operations (speed matters)
-- Netflix uses Java/Node.js (good enough performance)
-- Facebook still uses PHP (with massive optimization)
-
-## Share Your Results!
-
-Run the benchmark and share your results. Different hardware will show different absolute times, but relative performance should be consistent.
-
-### Hardware used for example results:
-- CPU: Apple M1 / Intel i7-9750H / AMD Ryzen 5900X
-- RAM: 16GB
-- OS: macOS 14 / Ubuntu 22.04 / Windows 11
-- Node: v20.x
-- PHP: 8.2
-- .NET: 6.0+
-- GCC: 11.x
-- Rust: 1.75+
-
-## Conclusion
-
-Choose the right tool for the job, but understand the tradeoffs. This benchmark provides concrete data to inform those decisions.
-
-**For CPU-bound tasks like this**: C/Rust > C# >> JavaScript/PHP
-**For I/O-bound tasks**: The gap narrows significantly
-**For developer productivity**: Often the inverse order
-
-The best choice depends on your specific requirements, team expertise, and business constraints.
+*Benchmark conducted on AMD Ryzen 9 9950X3D - one of the fastest consumer CPUs available (2024)*
