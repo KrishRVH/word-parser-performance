@@ -17,19 +17,19 @@
 ## Build Commands
 
 ```bash
-# Production - maximum speed (use znver4 if compiler doesn't support znver5)
+# Production - optimal configuration (8 threads, AVX-512)
+gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer \
+    -funroll-loops -pthread wordcount_hyperopt.c -o wordcount -lm
+
+# Alternative with explicit architecture (if native doesn't work)
 gcc -O3 -march=znver4 -mtune=znver4 -mavx512f -mavx512bw -mavx512vl \
     -msse4.2 -flto -fomit-frame-pointer -funroll-loops -pthread \
     wordcount_hyperopt.c -o wordcount -lm
 
-# Alternative: Native architecture detection
+# Override thread count if needed (but 8 is optimal for 9950X3D)
 gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer \
-    -funroll-loops -pthread wordcount_hyperopt.c -o wordcount -lm
-
-# Try 256-bit vectors (sometimes faster on Zen 5)
-gcc -O3 -march=znver4 -mprefer-vector-width=256 -msse4.2 -flto \
-    -fomit-frame-pointer -funroll-loops -pthread \
-    wordcount_hyperopt.c -o wordcount_256 -lm
+    -funroll-loops -pthread -DNUM_THREADS=16 \
+    wordcount_hyperopt.c -o wordcount_16t -lm
 
 # Debug build - IMPORTANT: Use -O2 for meaningful metrics, not -O0
 gcc -O2 -g -DDEBUG -fno-omit-frame-pointer -march=native -pthread \
@@ -45,9 +45,11 @@ gcc -O3 -march=znver4 -fprofile-use -pthread wordcount_hyperopt.c -o wordcount_f
 
 ### Key Design Decisions
 - **IMPORTANT**: 8 threads optimal on 9950X3D (matches V-Cache CCD physical cores)
-  - 16 threads: ~497 MB/s throughput
-  - 8 threads: ~715 MB/s throughput (44% faster!)
+  - 16 threads: 571 MB/s throughput
+  - 8 threads: 832 MB/s throughput (46% faster!)
+  - This is now the default configuration in the code
 - Threads pinned to physical cores (no SMT to avoid cache thrashing)
+- 512-bit AVX-512 vectors preferred over 256-bit (832 MB/s vs 796 MB/s)
 - Open addressing hash table with linear probing
 - Dynamic resize at 70% load factor
 - Per-thread 32MB string pools with malloc fallback tracking
@@ -268,18 +270,22 @@ perf stat -e cache-misses,cache-references,LLC-loads,LLC-load-misses ./wordcount
 
 ## Performance Results
 
-### Current Performance (5.3MB test file)
-- **Reference C implementation**: 260 MB/s
-- **Hyperopt with 16 threads**: 497-520 MB/s
-- **Hyperopt with 8 threads**: 715 MB/s (optimal)
+### Final Performance (5.3MB test file, 928K words)
+- **Reference C implementation**: 204 MB/s
+- **Hyperopt with 16 threads**: 571 MB/s
+- **Hyperopt with 8 threads**: **832 MB/s** (optimal - now default)
+- **Hyperopt with 8 threads + 256-bit**: 796 MB/s (slower than 512-bit)
+- **Hyperopt with PGO**: 588 MB/s (minimal benefit)
 - **Target**: 3.0 GB/s
-- **Current achievement**: 24% of target
+- **Current achievement**: 27.7% of target
 
-### Performance Breakdown
-- Processing phase: 83% of time (15.7ms)
-- Merge phase: 17% of time (3.2ms)
+### Performance Breakdown (8-thread configuration)
+- Execution time: ~6.3ms
+- Processing phase: ~5.2ms (83%)
+- Merge phase: ~1.1ms (17%)
 - Hash table health: Excellent (avg probe 1.09)
 - SIMD utilization: Good (48K SIMD vs 42K scalar chunks)
+- Speedup vs reference: **4.1x**
 
 ## Key Invariants
 
@@ -298,10 +304,11 @@ perf stat -e cache-misses,cache-references,LLC-loads,LLC-load-misses ./wordcount
    - Solution: Use `znver4` or `march=native` instead
    - The Zen 5 architecture may not be supported in older GCC versions
 
-2. **Performance below expectations (~500 MB/s instead of 3 GB/s)**
-   - Try 8 threads instead of 16: `gcc -DNUM_THREADS=8 ...`
-   - 8 threads optimal for V-Cache CCD on 9950X3D
-   - Check debug log for thread imbalance
+2. **Performance below expectations**
+   - Default is now 8 threads (optimal for 9950X3D)
+   - If you have different hardware, try: `gcc -DNUM_THREADS=16 ...`
+   - Avoid 256-bit vectors - testing showed 512-bit is faster (832 vs 796 MB/s)
+   - PGO provides minimal benefit (~3%) for this workload
 
 3. **"free(): invalid pointer" error**
    - Run with AddressSanitizer: `gcc -fsanitize=address ...`

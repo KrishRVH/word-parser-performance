@@ -124,9 +124,19 @@ static inline void* xaligned_alloc(size_t align, size_t size) {
 #endif
 
 #define CACHELINE 64
+
+// Thread configuration optimized for AMD Ryzen 9 9950X3D
+// Testing showed 8 threads (matching V-Cache CCD physical cores) delivers
+// ~46% better performance than 16 threads (832 MB/s vs 571 MB/s)
+// This avoids cross-CCD communication overhead and cache thrashing
 #ifndef NUM_THREADS
-#define NUM_THREADS 16
+#define NUM_THREADS 8  // Optimal for 9950X3D V-Cache CCD
 #endif
+
+// Note on vector width: Testing showed 256-bit vectors slightly hurt performance
+// (796 MB/s vs 832 MB/s). The default 512-bit AVX-512 vectors perform best on Zen 5
+// despite AMD's general preference for 256-bit operations in some workloads.
+
 #define INITIAL_CAPACITY 65536
 #define STRING_POOL_SIZE (32 * 1024 * 1024)
 #define MAX_WORD 100

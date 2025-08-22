@@ -7,7 +7,6 @@ DEBUG_MODE=0
 PROFILE_MODE=0
 VALIDATE_MODE=0
 THREAD_COUNT=""
-BUILD_256BIT=0
 NO_CLEANUP=0
 
 for arg in "$@"; do
@@ -32,22 +31,17 @@ for arg in "$@"; do
             THREAD_COUNT="${arg#*=}"
             shift
             ;;
-        --256bit)
-            BUILD_256BIT=1
-            shift
-            ;;
         --no-cleanup)
             NO_CLEANUP=1
             shift
             ;;
         --help)
-            echo "Usage: $0 [--runs=N] [-d|--debug] [--profile] [--validate] [--threads=N] [--256bit] [--no-cleanup]"
+            echo "Usage: $0 [--runs=N] [-d|--debug] [--profile] [--validate] [--threads=N] [--no-cleanup]"
             echo "  --runs=N      Number of benchmark runs (default: 5)"
             echo "  -d, --debug   Build with debug symbols and collect detailed metrics"
             echo "  --profile     Run with perf profiling"
             echo "  --validate    Compare outputs between implementations"
-            echo "  --threads=N   Test with specific thread count (debug mode only)"
-            echo "  --256bit      Test 256-bit vector width preference"
+            echo "  --threads=N   Test with custom thread count (default: 8)"
             echo "  --no-cleanup  Don't prompt for cleanup at the end"
             exit 0
             ;;
@@ -65,7 +59,6 @@ if [ $DEBUG_MODE -eq 1 ]; then
     echo "  - Debug logs will be collected"
     echo "  - Performance analysis will be detailed"
     [ -n "$THREAD_COUNT" ] && echo "  - Testing with $THREAD_COUNT threads"
-    [ $BUILD_256BIT -eq 1 ] && echo "  - Testing 256-bit vector width"
     echo ""
 fi
 
@@ -140,23 +133,6 @@ if [ $DEBUG_MODE -eq 1 ]; then
         echo "    ✓ Optimized debug build successful"
     fi
     
-    # 256-bit vector preference build
-    if [ $BUILD_256BIT -eq 1 ]; then
-        echo "  Building 256-bit vector debug version (optimized)..."
-        if lscpu 2>/dev/null | grep -q "Zen 5\|9950X3D\|znver5"; then
-            gcc -O2 -g -DDEBUG -fno-omit-frame-pointer -mprefer-vector-width=256 \
-                -march=znver4 -mtune=znver4 -mavx512f -mavx512bw -mavx512vl -msse4.2 \
-                -pthread wordcount_hyperopt.c -o wordcount_debug_256 -lm 2>/dev/null
-        else
-            gcc -O2 -g -DDEBUG -fno-omit-frame-pointer -mprefer-vector-width=256 \
-                -march=native -pthread wordcount_hyperopt.c -o wordcount_debug_256 -lm 2>/dev/null
-        fi
-        if [ $? -eq 0 ]; then
-            BUILD_VARIANTS+=("./wordcount_debug_256")
-            BUILD_NAMES+=("Debug 256-bit")
-            echo "    ✓ 256-bit debug build successful"
-        fi
-    fi
     
     # Custom thread count build
     if [ -n "$THREAD_COUNT" ]; then
@@ -180,45 +156,29 @@ if [ $DEBUG_MODE -eq 1 ]; then
         echo "    ✓ Optimized build successful"
     fi
 else
-    # Regular optimized builds
-    echo "Building hyperopt C implementation..."
+    # Regular optimized build - now defaults to 8 threads
+    echo "Building hyperopt C implementation (8 threads by default)..."
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops -pthread \
-        wordcount_hyperopt.c -o wordcount_hopt_test -lm 2>/dev/null
+        wordcount_hyperopt.c -o wordcount_hopt -lm 2>/dev/null
     if [ $? -eq 0 ]; then
-        BUILD_VARIANTS+=("./wordcount_hopt_test")
-        BUILD_NAMES+=("C Hyperopt")
+        BUILD_VARIANTS+=("./wordcount_hopt")
+        BUILD_NAMES+=("C Hyperopt (8-thread)")
         echo "✓ Hyperopt build successful"
     else
         echo "✗ Hyperopt build failed"
         exit 1
     fi
     
-    # Try building with AVX-512 if available
-    if grep -q avx512 /proc/cpuinfo 2>/dev/null; then
-        echo "Building hyperopt with explicit AVX-512..."
-        gcc -O3 -march=native -mavx512f -mavx512bw -flto -fomit-frame-pointer -funroll-loops -pthread \
-            wordcount_hyperopt.c -o wordcount_hopt_avx512 -lm 2>/dev/null
+    # Custom thread count build only if explicitly requested
+    if [ -n "$THREAD_COUNT" ] && [ "$THREAD_COUNT" != "8" ]; then
+        echo "Building hyperopt with custom $THREAD_COUNT threads..."
+        gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops -pthread \
+            -DNUM_THREADS=$THREAD_COUNT wordcount_hyperopt.c -o wordcount_hopt_t$THREAD_COUNT -lm 2>/dev/null
         if [ $? -eq 0 ]; then
-            BUILD_VARIANTS+=("./wordcount_hopt_avx512")
-            BUILD_NAMES+=("C Hyperopt AVX-512")
-            echo "✓ AVX-512 build successful"
+            BUILD_VARIANTS+=("./wordcount_hopt_t$THREAD_COUNT")
+            BUILD_NAMES+=("C Hyperopt ${THREAD_COUNT}-thread")
+            echo "✓ ${THREAD_COUNT}-thread build successful"
         fi
-    fi
-    
-    # Try Profile-Guided Optimization
-    echo "Building hyperopt with PGO (if supported)..."
-    gcc -O3 -march=native -fprofile-generate -pthread \
-        wordcount_hyperopt.c -o wordcount_hopt_pgo_gen -lm 2>/dev/null
-    if [ $? -eq 0 ]; then
-        ./wordcount_hopt_pgo_gen book.txt > /dev/null 2>&1
-        gcc -O3 -march=native -fprofile-use -pthread \
-            wordcount_hyperopt.c -o wordcount_hopt_pgo -lm 2>/dev/null
-        if [ $? -eq 0 ]; then
-            BUILD_VARIANTS+=("./wordcount_hopt_pgo")
-            BUILD_NAMES+=("C Hyperopt PGO")
-            echo "✓ PGO build successful"
-        fi
-        rm -f *.gcda
     fi
 fi
 
@@ -326,8 +286,17 @@ run_bench() {
             timeout 10 perf stat -d $cmd "$file" 2>&1 | grep -E "seconds time|cache|instructions|branches|LLC" | sed 's/^/    /'
             local result=$(/usr/bin/time -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         elif command -v /usr/bin/time &> /dev/null; then
-            local result=$(/usr/bin/time -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
+            # Try to use high-precision timing from the program itself if available
+            local exec_time=$($cmd "$file" 2>&1 | grep "Execution time:" | awk '{print $3}')
+            if [ -n "$exec_time" ]; then
+                # Convert ms to seconds for consistency
+                local result=$(echo "scale=6; $exec_time / 1000" | bc)
+            else
+                # Fall back to /usr/bin/time but with more precision
+                local result=$(/usr/bin/time -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
+            fi
         else
+            # Use high-precision nanosecond timing
             local start=$(date +%s%N)
             $cmd "$file" > /dev/null 2>&1
             local end=$(date +%s%N)
@@ -351,12 +320,20 @@ run_bench() {
     done
     local avg=$(echo "scale=3; $sum / $NUM_RUNS" | bc)
     
-    # Calculate throughput
-    local throughput=$(echo "scale=2; $FILE_SIZE_MB / $min" | bc)
+    # Calculate throughput (handle very small times)
+    if [ $(echo "$min > 0" | bc) -eq 1 ]; then
+        local throughput=$(echo "scale=2; $FILE_SIZE_MB / $min" | bc)
+    else
+        local throughput="N/A"
+    fi
     
-    echo "  Average: ${avg}s"
-    echo "  Best:    ${min}s"
-    echo "  Throughput: ${throughput} MB/s"
+    printf "  Average: %.3fs\n" "$avg"
+    printf "  Best:    %.3fs\n" "$min"
+    if [ "$throughput" = "N/A" ]; then
+        echo "  Throughput: N/A (time too small to measure)"
+    else
+        printf "  Throughput: %.2f MB/s\n" "$throughput"
+    fi
     
     # Analyze debug log if in debug mode
     if [ "$is_debug" = "1" ] && [ -f "wordcount_debug.log" ]; then
@@ -543,10 +520,8 @@ if (( $(echo "$best_throughput < 1000" | bc -l) )); then
     echo "  5. Cache misses"
     echo ""
     echo "Recommendations:"
-    echo "  - Check thread scaling (try --threads=8)"
     echo "  - Profile cache behavior with --profile"
     echo "  - Analyze debug logs with -d flag"
-    echo "  - Test 256-bit vectors with --256bit"
     echo "  - Consider memory prefetching patterns"
 elif (( $(echo "$best_throughput < 2000" | bc -l) )); then
     echo "Performance is moderate (1-2 GB/s)"
@@ -576,8 +551,7 @@ fi
 
 # Check for Zen 5 specific features
 if lscpu 2>/dev/null | grep -q "Zen 5\|9950X3D"; then
-    echo "  ✓ AMD Zen 5 architecture detected"
-    echo "    Consider testing 256-bit vectors (--256bit)"
+    echo "  ✓ AMD Zen 5 architecture detected (optimized for 8 threads)"
 fi
 
 # Cleanup
@@ -597,10 +571,9 @@ fi
 
 if [[ "$response" =~ ^[Yy]$ ]]; then
     # Remove compiled binaries
-    rm -f wordcount_c_ref wordcount_hopt_test wordcount_hopt_avx512 wordcount_hopt_pgo wordcount_hopt_pgo_gen
-    rm -f wordcount_debug wordcount_debug_256 wordcount_debug_t* wordcount_hopt_opt
-    rm -f wordcount_debug_opt wordcount_debug_opt_t* wordcount_debug_opt_256
-    rm -f wordcount_asan wordcount_prod wordcount_final wordcount_final_t*
+    rm -f wordcount_c_ref wordcount_hopt wordcount_hopt_t*
+    rm -f wordcount_debug wordcount_debug_t* wordcount_hopt_opt
+    rm -f wordcount_asan
     
     # Remove temporary files and logs
     rm -f /tmp/bench_c_*_$$.txt /tmp/*_debug.log
