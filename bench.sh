@@ -139,10 +139,10 @@ if [ "$HAS_GCC" = "1" ]; then
         HAS_GCC=0
     fi
     
-    echo "Compiling C hyperopt version..."
+    echo "Compiling C hyperopt version (8 threads by default)..."
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops -pthread wordcount_hyperopt.c -o wordcount_hopt -lm 2>/dev/null
     if [ $? -eq 0 ]; then
-        echo "✓ C hyperopt compilation successful"
+        echo "✓ C hyperopt compilation successful (optimized for 8 threads)"
     else
         echo "✗ C hyperopt compilation failed"
     fi
@@ -370,11 +370,27 @@ run_benchmark() {
     
     local total_time=0
     for ((run=1; run<=NUM_RUNS; run++)); do
-        if command -v /usr/bin/time &> /dev/null; then
-            local result=$(/usr/bin/time -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
+        # Try to extract high-precision timing from the program itself first
+        local exec_time=$($cmd "$file" 2>&1 | grep -E "(Execution time:|Elapsed time:)" | grep -oE "[0-9]+\.?[0-9]*" | head -1)
+        
+        if [ -n "$exec_time" ]; then
+            # Check if the output contains "ms" to determine units
+            local has_ms=$($cmd "$file" 2>&1 | grep -E "(Execution time:|Elapsed time:)" | grep -q "ms" && echo "1" || echo "0")
+            
+            if [ "$has_ms" = "1" ] || (( $(echo "$exec_time < 1000 && $exec_time > 1" | bc -l) )); then
+                # Time is in milliseconds, convert to seconds
+                local result=$(echo "scale=6; $exec_time / 1000" | bc)
+            else
+                # Time is already in seconds
+                local result=$exec_time
+            fi
+        elif command -v /usr/bin/time &> /dev/null; then
+            # Use high-precision time format
+            local result=$(/usr/bin/time -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         elif command -v gtime &> /dev/null; then
-            local result=$(gtime -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
+            local result=$(gtime -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         else
+            # Fallback to nanosecond precision
             local start=$(date +%s%N)
             $cmd "$file" > /dev/null 2>&1
             local end=$(date +%s%N)
@@ -390,7 +406,12 @@ run_benchmark() {
     done
     
     local avg_time=$(echo "scale=6; $total_time / $NUM_RUNS" | bc)
-    avg_time=$(printf "%.3f" "$avg_time")
+    # Keep full precision for small times
+    if (( $(echo "$avg_time < 0.1" | bc -l) )); then
+        avg_time=$(printf "%.4f" "$avg_time")
+    else
+        avg_time=$(printf "%.3f" "$avg_time")
+    fi
     echo "    Average: ${avg_time}s"
     echo ""
     
@@ -413,7 +434,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
         run_benchmark "C" "./wordcount_c" "$TEST_FILE"
         
         if [ -f "wordcount_hopt" ]; then
-            run_benchmark "C hyperopt" "./wordcount_hopt" "$TEST_FILE"
+            run_benchmark "C hyperopt (8-thread)" "./wordcount_hopt" "$TEST_FILE"
         fi
     fi
     
@@ -564,9 +585,9 @@ echo ""
 
 echo "To run individual tests:"
 if [ "$HAS_GCC" = "1" ]; then
-    echo "  ./wordcount_c book.txt"
+    echo "  ./wordcount_c book.txt          # Reference C implementation"
     if [ -f "wordcount_hopt" ]; then
-        echo "  ./wordcount_hopt book.txt"
+        echo "  ./wordcount_hopt book.txt       # Hyperoptimized C (8 threads)"
     fi
 fi
 if [ "$HAS_RUST" = "1" ]; then
