@@ -192,117 +192,181 @@ EOF
 fi
 echo ""
 
-# Validation function
+# Helper function to extract counts from console output
+extract_counts_from_output() {
+    local impl=$1
+    local test_file=$2
+    local output=$($impl "$test_file" 2>/dev/null | grep -E "Total words:|Unique words:")
+    local total=$(echo "$output" | grep "Total words:" | sed 's/[^0-9]//g')
+    local unique=$(echo "$output" | grep "Unique words:" | sed 's/[^0-9]//g')
+    echo "$total $unique"
+}
+
+# Validation function using C as source of truth
 validate_results() {
     local file=$1
     local base_name="${file%.txt}"
     
     echo "  Validating results for $file..."
     
-    # Collect all result files for this input
-    declare -a result_files
-    declare -a languages
+    # Get C implementation results as the reference
+    local c_counts=""
+    local expected_total=0
+    local expected_unique=0
     
-    if [ -f "${base_name}_c_results.txt" ]; then
-        result_files+=("${base_name}_c_results.txt")
-        languages+=("C")
-    fi
-    if [ -f "${base_name}_rust_optimized_results.txt" ]; then
-        result_files+=("${base_name}_rust_optimized_results.txt")
-        languages+=("Rust")
-    fi
-    if [ -f "${base_name}_go_results.txt" ]; then
-        result_files+=("${base_name}_go_results.txt")
-        languages+=("Go")
-    fi
-    if [ -f "${base_name}_csharp_results.txt" ]; then
-        result_files+=("${base_name}_csharp_results.txt")
-        languages+=("C#")
-    fi
-    if [ -f "${base_name}_javascript_results.txt" ]; then
-        result_files+=("${base_name}_javascript_results.txt")
-        languages+=("JavaScript")
-    fi
-    if [ -f "${base_name}_php_results.txt" ]; then
-        result_files+=("${base_name}_php_results.txt")
-        languages+=("PHP")
-    fi
-    
-    if [ ${#result_files[@]} -lt 2 ]; then
-        echo "    ⚠ Less than 2 result files found, skipping validation"
+    if [ "$HAS_GCC" = "1" ] && [ -f "wordcount_c" ]; then
+        c_counts=$(extract_counts_from_output "./wordcount_c" "$file")
+        expected_total=$(echo $c_counts | cut -d' ' -f1)
+        expected_unique=$(echo $c_counts | cut -d' ' -f2)
+        echo "    Using C as reference: $expected_total total, $expected_unique unique"
+    else
+        echo "    ⚠ C implementation not available for reference"
         return
     fi
     
-    # Extract top 10 words and counts from each file
-    # More robust extraction that handles different formats
-    local temp_dir=$(mktemp -d)
-    local has_differences=0
-    declare -A differences
+    # Collect counts from all implementations
+    declare -a languages
+    declare -a total_counts
+    declare -a unique_counts
     
-    for i in "${!result_files[@]}"; do
-        # Extract lines that look like rankings
-        # Handle formats like "1. word 1,234" or "1  word  1234"
-        grep -E '^\s*[0-9]+[\.\s]' "${result_files[$i]}" | \
-            head -10 | \
-            sed 's/[,]//g' | \
-            awk '{
-                # Find the word (second non-numeric field) and count (last numeric field)
-                word = ""
-                count = ""
-                for(i=1; i<=NF; i++) {
-                    if ($i ~ /^[0-9]+$/ && i > 1) {
-                        count = $i
-                    } else if ($i !~ /^[0-9]+\.?$/ && word == "") {
-                        word = $i
-                    }
-                }
-                if (word != "" && count != "") print word, count
-            }' | sort > "$temp_dir/results_$i.txt"
-    done
+    # Always include C first as reference
+    languages+=("C (ref)")
+    total_counts+=("$expected_total")
+    unique_counts+=("$expected_unique")
     
-    # Check if all files have the same content
-    local reference_file="$temp_dir/results_0.txt"
+    # Test other implementations
+    if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
+        counts=$(extract_counts_from_output "./wordcount_rust" "$file")
+        total=$(echo $counts | cut -d' ' -f1)
+        unique=$(echo $counts | cut -d' ' -f2)
+        languages+=("Rust")
+        total_counts+=("$total")
+        unique_counts+=("$unique")
+    fi
+    
+    if [ "$HAS_GO" = "1" ] && [ -f "wordcount_go" ]; then
+        counts=$(extract_counts_from_output "./wordcount_go" "$file")
+        total=$(echo $counts | cut -d' ' -f1)
+        unique=$(echo $counts | cut -d' ' -f2)
+        languages+=("Go")
+        total_counts+=("$total")
+        unique_counts+=("$unique")
+    fi
+    
+    if [ "$HAS_DOTNET" = "1" ] && [ -f "bin/Release/net8.0/WordCount" ]; then
+        counts=$(extract_counts_from_output "./bin/Release/net8.0/WordCount" "$file")
+        total=$(echo $counts | cut -d' ' -f1)
+        unique=$(echo $counts | cut -d' ' -f2)
+        languages+=("C#")
+        total_counts+=("$total")
+        unique_counts+=("$unique")
+    fi
+    
+    if [ "$HAS_NODE" = "1" ] && [ -f "wordcount.js" ]; then
+        counts=$(extract_counts_from_output "node wordcount.js" "$file")
+        total=$(echo $counts | cut -d' ' -f1)
+        unique=$(echo $counts | cut -d' ' -f2)
+        languages+=("JavaScript")
+        total_counts+=("$total")
+        unique_counts+=("$unique")
+    fi
+    
+    if [ "$HAS_PHP" = "1" ] && [ -f "wordcount.php" ]; then
+        counts=$(extract_counts_from_output "php wordcount.php" "$file")
+        total=$(echo $counts | cut -d' ' -f1)
+        unique=$(echo $counts | cut -d' ' -f2)
+        languages+=("PHP")
+        total_counts+=("$total")
+        unique_counts+=("$unique")
+    fi
+    
+    # Check word counts against C reference
+    echo "    Word count comparison:"
     local all_match=1
-    
-    for ((i=1; i<${#result_files[@]}; i++)); do
-        if ! cmp -s "$reference_file" "$temp_dir/results_$i.txt"; then
-            all_match=0
-            differences["${languages[$i]}"]=1
+    for i in "${!languages[@]}"; do
+        if [ $i -eq 0 ]; then
+            # Skip C itself
+            printf "      %-15s: %d total, %d unique (reference)\n" \
+                "${languages[$i]}" "${total_counts[$i]}" "${unique_counts[$i]}"
+        else
+            local diff_total=$((${total_counts[$i]} - expected_total))
+            local diff_unique=$((${unique_counts[$i]} - expected_unique))
+            
+            if [ "${total_counts[$i]}" = "$expected_total" ] && [ "${unique_counts[$i]}" = "$expected_unique" ]; then
+                printf "      %-15s: ✓ Exact match\n" "${languages[$i]}"
+            else
+                all_match=0
+                if [ -n "${total_counts[$i]}" ] && [ -n "${unique_counts[$i]}" ]; then
+                    printf "      %-15s: ⚠ Total: %d (%+d), Unique: %d (%+d)\n" \
+                        "${languages[$i]}" "${total_counts[$i]}" "$diff_total" \
+                        "${unique_counts[$i]}" "$diff_unique"
+                else
+                    printf "      %-15s: ✗ Failed to get counts\n" "${languages[$i]}"
+                fi
+            fi
         fi
     done
     
-    if [ $all_match -eq 1 ]; then
-        echo "    ✓ All implementations produce identical results"
-    else
-        echo "    ⚠ Results differ between implementations:"
+    # Check top 10 words consistency
+    echo "    Top words consistency check:"
+    local temp_dir=$(mktemp -d)
+    declare -a result_files
+    
+    # Collect result files
+    [ -f "${base_name}_c_results.txt" ] && result_files+=("${base_name}_c_results.txt")
+    [ -f "${base_name}_rust_optimized_results.txt" ] && result_files+=("${base_name}_rust_optimized_results.txt")
+    [ -f "${base_name}_go_results.txt" ] && result_files+=("${base_name}_go_results.txt")
+    [ -f "${base_name}_csharp_results.txt" ] && result_files+=("${base_name}_csharp_results.txt")
+    [ -f "${base_name}_javascript_results.txt" ] && result_files+=("${base_name}_javascript_results.txt")
+    [ -f "${base_name}_php_results.txt" ] && result_files+=("${base_name}_php_results.txt")
+    
+    if [ ${#result_files[@]} -ge 2 ]; then
+        for i in "${!result_files[@]}"; do
+            grep -E '^\s*[0-9]+[\.\s]' "${result_files[$i]}" | \
+                head -10 | \
+                sed 's/[,]//g' | \
+                awk '{
+                    word = ""
+                    count = ""
+                    for(i=1; i<=NF; i++) {
+                        if ($i ~ /^[0-9]+$/ && i > 1) {
+                            count = $i
+                        } else if ($i !~ /^[0-9]+\.?$/ && word == "") {
+                            word = $i
+                        }
+                    }
+                    if (word != "" && count != "") print word, count
+                }' | sort > "$temp_dir/results_$i.txt"
+        done
         
-        # Show which implementations differ
-        local matching_with_c=""
-        local different_from_c=""
+        # Check if all files have the same top 10
+        local reference_file="$temp_dir/results_0.txt"
+        local top_words_match=1
         
-        for ((i=1; i<${#languages[@]}; i++)); do
-            if cmp -s "$reference_file" "$temp_dir/results_$i.txt"; then
-                matching_with_c="$matching_with_c ${languages[$i]}"
-            else
-                different_from_c="$different_from_c ${languages[$i]}"
+        for ((i=1; i<${#result_files[@]}; i++)); do
+            if ! cmp -s "$reference_file" "$temp_dir/results_$i.txt"; then
+                top_words_match=0
+                break
             fi
         done
         
-        if [ -n "$matching_with_c" ]; then
-            echo "      Matching: C${matching_with_c}"
+        if [ $top_words_match -eq 1 ]; then
+            echo "      ✓ All implementations have identical top 10 words"
+        else
+            echo "      ⚠ Top 10 words differ between implementations"
         fi
-        if [ -n "$different_from_c" ]; then
-            echo "      Different:${different_from_c}"
-        fi
-        
-        echo "    Top 3 words from each implementation:"
-        for i in "${!languages[@]}"; do
-            local top3=$(head -3 "$temp_dir/results_$i.txt" | awk '{printf "%s(%s) ", $1, $2}')
-            printf "      %-15s %s\n" "${languages[$i]}:" "$top3"
-        done
+    else
+        echo "      ⚠ Not enough result files to compare"
     fi
     
     rm -rf "$temp_dir"
+    
+    # Overall result
+    if [ $all_match -eq 1 ]; then
+        echo "    ✓ Perfect validation: All implementations match C reference"
+    else
+        echo "    ⚠ Some implementations differ from C reference"
+    fi
 }
 
 # Arrays to store results for ranking
@@ -522,6 +586,11 @@ if [ $RESULT_COUNT -gt 0 ]; then
             elif [ -f /proc/cpuinfo ]; then
                 echo "- CPU: $(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)"
             fi
+            
+            if [ $VALIDATE -eq 1 ]; then
+                echo ""
+                echo "- Validation: Using C implementation as reference"
+            fi
         fi
     fi
     
@@ -562,8 +631,8 @@ if [[ "$response" =~ ^[Yy]$ ]]; then
     rm -rf bin obj
     rm -f WordCount.csproj
     
-    # Remove test files
-    rm -f book.txt book_10mb.txt book_50mb.txt
+    # Remove test files (except the original book.txt)
+    rm -f book_10mb.txt book_50mb.txt book_60mb.txt
     
     # Remove result files
     rm -f *_results.txt

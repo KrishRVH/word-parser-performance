@@ -10,7 +10,7 @@
  * - Memory pooling for temporary buffers
  * - Unsafe string conversions where safe
  * - Optimized sorting with pre-allocation
- * - mmap for huge files (commented out - requires syscall)
+ * - FIXED: Buffer boundary handling for correct word counting
  * 
  * Build: go build -ldflags="-s -w" -o wordcount_go wordcount.go
  * Usage: ./wordcount_go [filename]
@@ -116,7 +116,7 @@ func toLower(b byte) byte {
 	return b
 }
 
-// Optimized file processor using bufio.Scanner with custom split function
+// Optimized file processor with FIXED buffer boundary handling
 func processFile(filename string) (map[string]int, int64, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -149,31 +149,59 @@ func processFile(filename string) (map[string]int, int64, error) {
 		data := chunk[:n]
 		if len(leftover) > 0 {
 			data = append(leftover, data...)
+			leftover = leftover[:0] // Clear leftover
 		}
 		
 		// Process the chunk
 		pos := 0
 		dataLen := len(data)
+		lastWordStart := -1
 		
 		for pos < dataLen {
-			word, newPos, found := extractWord(data, pos, wordBuf)
+			wordStartPos := pos
+			// Skip non-alpha to find word start
+			for pos < dataLen && !isAlpha(data[pos]) {
+				pos++
+			}
+			
+			if pos >= dataLen {
+				break // No more words in this chunk
+			}
+			
+			// Mark the start of this word
+			lastWordStart = pos
+			
+			// Extract the word
+			word, newPos, found := extractWord(data, wordStartPos, wordBuf)
 			if found {
-				// Create string only once per unique word
 				wordStr := string(word)
 				counts[wordStr]++
 				totalWords++
 			}
 			pos = newPos
-			
-			// Handle word boundary at chunk end
-			if pos >= dataLen-maxWordLength && pos < dataLen {
-				leftover = append(leftover[:0], data[pos:]...)
-				break
+		}
+		
+		// FIXED: Check if we ended in the middle of a word
+		if lastWordStart >= 0 && lastWordStart < dataLen {
+			// Check if the last character is a letter (incomplete word)
+			if dataLen > 0 && isAlpha(data[dataLen-1]) {
+				// Save from the start of the last word
+				leftover = append(leftover[:0], data[lastWordStart:]...)
 			}
 		}
 		
 		if err == io.EOF {
 			break
+		}
+	}
+	
+	// Process any remaining leftover
+	if len(leftover) > 0 {
+		word, _, found := extractWord(leftover, 0, wordBuf)
+		if found {
+			wordStr := string(word)
+			counts[wordStr]++
+			totalWords++
 		}
 	}
 	
@@ -346,42 +374,9 @@ func main() {
 	fmt.Println("- Large buffer I/O (64KB)")
 	fmt.Println("- Zero-allocation string conversions where safe")
 	fmt.Println("- Inline functions for hot path")
+	fmt.Println("- FIXED: Buffer boundary word handling")
 	fmt.Println("\nFor even better performance:")
 	fmt.Println("- Build with: go build -ldflags=\"-s -w\" wordcount.go")
 	fmt.Println("- Profile with: go run -cpuprofile=cpu.prof wordcount.go")
 	fmt.Println("- Consider parallel processing for huge files")
 }
-
-/**
- * Advanced optimizations that could be added:
- * 
- * 1. Memory-mapped files (for huge files):
- *    - Use golang.org/x/exp/mmap or syscall.Mmap
- *    - Eliminates buffer copying overhead
- * 
- * 2. Parallel processing:
- *    - Split file into chunks
- *    - Process chunks in parallel goroutines
- *    - Merge results at the end
- * 
- * 3. Custom hash table:
- *    - Implement open addressing hash table
- *    - Avoid map's interface{} overhead
- * 
- * 4. SIMD optimizations:
- *    - Use golang.org/x/sys/cpu for SIMD detection
- *    - Implement vectorized toLower and isAlpha
- * 
- * 5. Profile-guided optimization:
- *    - Use pprof to identify hot spots
- *    - Optimize based on actual performance data
- * 
- * Compile flags for maximum performance:
- * GOGC=off go build -ldflags="-s -w" -gcflags="-B -l" wordcount.go
- * 
- * Where:
- * - GOGC=off: Disable GC during short runs
- * - -s -w: Strip debug info
- * - -B: Disable bounds checking
- * - -l: Disable inlining (sometimes helps, test both ways)
- */
