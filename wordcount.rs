@@ -1,14 +1,6 @@
-// wordcount.rs - TRULY OPTIMIZED VERSION
-/**
- * Word Frequency Counter - Rust Implementation (OPTIMIZED)
- * 
- * Major optimizations:
- * - Byte-level processing like C/Go
- * - No full-file lowercase conversion
- * - Minimal allocations with string interning
- * - FxHashMap for faster hashing
- * - Direct buffer processing
- */
+// wordcount.rs - Word frequency counter
+// Build: rustc -O wordcount.rs -o wordcount_rust
+// Usage: ./wordcount_rust [filename]
 
 use std::collections::HashMap;
 use std::env;
@@ -16,7 +8,7 @@ use std::fs::File;
 use std::io::{self, Read, Write, BufWriter};
 use std::time::Instant;
 
-// FNV-1a hash - faster than default SipHash for this use case
+// FNV-1a hash
 #[derive(Default)]
 struct FnvHasher {
     state: u64,
@@ -52,7 +44,6 @@ fn main() -> io::Result<()> {
     
     let start_time = Instant::now();
     
-    // Read file into buffer
     let mut file = match File::open(filename) {
         Ok(f) => f,
         Err(e) => {
@@ -62,13 +53,11 @@ fn main() -> io::Result<()> {
         }
     };
     
-    // Read entire file into buffer for byte-level processing
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
     
     let file_size = buffer.len() as f64 / 1024.0 / 1024.0;
     
-    // Process bytes directly - no string conversion
     let mut counts: FnvHashMap<String, u32> = FnvHashMap::with_capacity_and_hasher(
         10_000, 
         FnvBuildHasher::default()
@@ -79,11 +68,8 @@ fn main() -> io::Result<()> {
     
     for &byte in buffer.iter() {
         if byte.is_ascii_alphabetic() {
-            // Convert to lowercase and add to current word
             current_word.push(byte.to_ascii_lowercase());
         } else if !current_word.is_empty() {
-            // End of word - convert to string and count
-            // SAFETY: We know these are valid ASCII bytes
             let word = unsafe { String::from_utf8_unchecked(current_word.clone()) };
             
             *counts.entry(word).or_insert(0) += 1;
@@ -92,14 +78,12 @@ fn main() -> io::Result<()> {
         }
     }
     
-    // Handle last word if file doesn't end with non-letter
     if !current_word.is_empty() {
         let word = unsafe { String::from_utf8_unchecked(current_word) };
         *counts.entry(word).or_insert(0) += 1;
         total_words += 1;
     }
     
-    // Sort by frequency
     let mut sorted: Vec<(&String, &u32)> = counts.iter().collect();
     sorted.sort_unstable_by(|a, b| {
         b.1.cmp(a.1).then_with(|| a.0.cmp(b.0))
@@ -108,7 +92,6 @@ fn main() -> io::Result<()> {
     let duration = start_time.elapsed();
     let execution_time = duration.as_secs_f64() * 1000.0;
     
-    // Output results
     println!("\n=== Top 10 Most Frequent Words ===");
     for (index, (word, count)) in sorted.iter().take(10).enumerate() {
         println!("{:2}. {:<15} {:>8}", index + 1, word, format_number(**count));
@@ -119,10 +102,8 @@ fn main() -> io::Result<()> {
     println!("Total words:     {}", format_number(total_words as u32));
     println!("Unique words:    {}", format_number(counts.len() as u32));
     println!("Execution time:  {:.2} ms", execution_time);
-    println!("Hash function:   FNV-1a (faster than SipHash)");
-    println!("\nCompiled with: rustc -O (optimizations enabled)");
+    println!("Hash function:   FNV-1a");
     
-    // Write output file
     write_output_file(filename, &sorted, total_words, counts.len(), execution_time)?;
     
     Ok(())
@@ -154,13 +135,13 @@ fn write_output_file(
 ) -> io::Result<()> {
     let output_filename = input_filename
         .rsplit_once('.')
-        .map(|(base, _)| format!("{}_rust_optimized_results.txt", base))
-        .unwrap_or_else(|| format!("{}_rust_optimized_results.txt", input_filename));
+        .map(|(base, _)| format!("{}_rust_results.txt", base))
+        .unwrap_or_else(|| format!("{}_rust_results.txt", input_filename));
     
     let file = File::create(&output_filename)?;
     let mut writer = BufWriter::new(file);
     
-    writeln!(writer, "Word Frequency Analysis - Rust Implementation (Optimized)")?;
+    writeln!(writer, "Word Frequency Analysis - Rust Implementation")?;
     writeln!(writer, "Input file: {}", input_filename)?;
     writeln!(writer, "Execution time: {:.2} ms\n", execution_time)?;
     writeln!(writer, "Total words: {}", format_number(total_words as u32))?;

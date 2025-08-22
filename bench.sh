@@ -1,8 +1,7 @@
 #!/bin/bash
-# benchmark.sh - Performance comparison of word frequency counters
+# bench.sh - Performance benchmark
 # Usage: ./bench.sh [--validate] [--runs=N]
 
-# Parse command line arguments
 VALIDATE=0
 NUM_RUNS=3
 for arg in "$@"; do
@@ -37,13 +36,11 @@ fi
 echo "Runs per test: $NUM_RUNS"
 echo ""
 
-# Check dependencies
 check_dependency() {
     if ! command -v $1 &> /dev/null; then
         echo "✗ $1 is not installed"
         return 1
     else
-        # Special handling for go which doesn't accept --version
         if [ "$1" = "go" ]; then
             echo "✓ $1 is installed ($(go version 2>&1))"
         else
@@ -74,7 +71,6 @@ HAS_GO=$?; HAS_GO=$((1-HAS_GO))
 
 echo ""
 
-# Create test file if it doesn't exist
 if [ ! -f "book.txt" ]; then
     echo "Downloading test file (Moby Dick from Project Gutenberg)..."
     curl -s https://www.gutenberg.org/files/2701/2701-0.txt -o book.txt
@@ -83,7 +79,6 @@ else
     echo "✓ Using existing book.txt"
 fi
 
-# Display file info
 FILE_SIZE=$(du -h book.txt | cut -f1)
 WORD_COUNT=$(wc -w < book.txt)
 LINE_COUNT=$(wc -l < book.txt)
@@ -94,7 +89,6 @@ echo "  Words: $(printf "%'d" $WORD_COUNT)"
 echo "  Lines: $(printf "%'d" $LINE_COUNT)"
 echo ""
 
-# Create larger test files
 create_test_file() {
     local size=$1
     local filename=$2
@@ -110,7 +104,6 @@ create_test_file() {
     fi
 }
 
-# Optionally create larger test files
 echo "Do you want to test with larger files? (y/n)"
 read -r response
 if [[ "$response" =~ ^[Yy]$ ]]; then
@@ -122,7 +115,6 @@ else
 fi
 echo ""
 
-# Compile Rust
 if [ "$HAS_RUST" = "1" ]; then
     echo "Compiling Rust version..."
     rustc -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 wordcount.rs -o wordcount_rust 2>rust_error.log
@@ -137,7 +129,6 @@ if [ "$HAS_RUST" = "1" ]; then
     fi
 fi
 
-# Compile C
 if [ "$HAS_GCC" = "1" ]; then
     echo "Compiling C version..."
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops wordcount.c -o wordcount_c 2>/dev/null
@@ -147,9 +138,16 @@ if [ "$HAS_GCC" = "1" ]; then
         echo "✗ C compilation failed"
         HAS_GCC=0
     fi
+    
+    echo "Compiling C hyperopt version..."
+    gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops -pthread wordcount_hyperopt.c -o wordcount_hopt -lm 2>/dev/null
+    if [ $? -eq 0 ]; then
+        echo "✓ C hyperopt compilation successful"
+    else
+        echo "✗ C hyperopt compilation failed"
+    fi
 fi
 
-# Build Go
 if [ "$HAS_GO" = "1" ]; then
     echo "Building Go version..."
     go build -gcflags="-B" -ldflags="-s -w" -o wordcount_go wordcount.go 2>/dev/null
@@ -161,7 +159,6 @@ if [ "$HAS_GO" = "1" ]; then
     fi
 fi
 
-# Build C#
 if [ "$HAS_DOTNET" = "1" ]; then
     echo "Building C# version..."
     if [ ! -f "WordCount.csproj" ]; then
@@ -192,7 +189,6 @@ EOF
 fi
 echo ""
 
-# Helper function to extract counts from console output
 extract_counts_from_output() {
     local impl=$1
     local test_file=$2
@@ -202,14 +198,11 @@ extract_counts_from_output() {
     echo "$total $unique"
 }
 
-# Validation function using C as source of truth
 validate_results() {
     local file=$1
     local base_name="${file%.txt}"
     
     echo "  Validating results for $file..."
-    
-    # Get C implementation results as the reference
     local c_counts=""
     local expected_total=0
     local expected_unique=0
@@ -224,17 +217,14 @@ validate_results() {
         return
     fi
     
-    # Collect counts from all implementations
     declare -a languages
     declare -a total_counts
     declare -a unique_counts
     
-    # Always include C first as reference
     languages+=("C (ref)")
     total_counts+=("$expected_total")
     unique_counts+=("$expected_unique")
     
-    # Test other implementations
     if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
         counts=$(extract_counts_from_output "./wordcount_rust" "$file")
         total=$(echo $counts | cut -d' ' -f1)
@@ -280,12 +270,10 @@ validate_results() {
         unique_counts+=("$unique")
     fi
     
-    # Check word counts against C reference
     echo "    Word count comparison:"
     local all_match=1
     for i in "${!languages[@]}"; do
         if [ $i -eq 0 ]; then
-            # Skip C itself
             printf "      %-15s: %d total, %d unique (reference)\n" \
                 "${languages[$i]}" "${total_counts[$i]}" "${unique_counts[$i]}"
         else
@@ -307,14 +295,13 @@ validate_results() {
         fi
     done
     
-    # Check top 10 words consistency
     echo "    Top words consistency check:"
     local temp_dir=$(mktemp -d)
     declare -a result_files
     
-    # Collect result files
     [ -f "${base_name}_c_results.txt" ] && result_files+=("${base_name}_c_results.txt")
-    [ -f "${base_name}_rust_optimized_results.txt" ] && result_files+=("${base_name}_rust_optimized_results.txt")
+    [ -f "${base_name}_c-hopt_results.txt" ] && result_files+=("${base_name}_c-hopt_results.txt")
+    [ -f "${base_name}_rust_results.txt" ] && result_files+=("${base_name}_rust_results.txt")
     [ -f "${base_name}_go_results.txt" ] && result_files+=("${base_name}_go_results.txt")
     [ -f "${base_name}_csharp_results.txt" ] && result_files+=("${base_name}_csharp_results.txt")
     [ -f "${base_name}_javascript_results.txt" ] && result_files+=("${base_name}_javascript_results.txt")
@@ -339,7 +326,6 @@ validate_results() {
                 }' | sort > "$temp_dir/results_$i.txt"
         done
         
-        # Check if all files have the same top 10
         local reference_file="$temp_dir/results_0.txt"
         local top_words_match=1
         
@@ -361,7 +347,6 @@ validate_results() {
     
     rm -rf "$temp_dir"
     
-    # Overall result
     if [ $all_match -eq 1 ]; then
         echo "    ✓ Perfect validation: All implementations match C reference"
     else
@@ -369,13 +354,11 @@ validate_results() {
     fi
 }
 
-# Arrays to store results for ranking
 declare -a LANG_NAMES
 declare -a LANG_TIMES
 declare -A ALL_RESULTS
 RESULT_COUNT=0
 
-# Run benchmarks
 run_benchmark() {
     local lang=$1
     local cmd=$2
@@ -383,26 +366,21 @@ run_benchmark() {
     
     echo "  $lang:"
     
-    # Warm-up run (not measured)
     $cmd "$file" > /dev/null 2>&1
     
-    # Actual benchmark (NUM_RUNS runs, take average)
     local total_time=0
     for ((run=1; run<=NUM_RUNS; run++)); do
-        # Use GNU time if available, otherwise use built-in time
         if command -v /usr/bin/time &> /dev/null; then
             local result=$(/usr/bin/time -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         elif command -v gtime &> /dev/null; then
             local result=$(gtime -f "%e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         else
-            # Fallback to bash time with nanosecond precision
             local start=$(date +%s%N)
             $cmd "$file" > /dev/null 2>&1
             local end=$(date +%s%N)
             local result=$(echo "scale=6; ($end - $start) / 1000000000" | bc)
         fi
         
-        # Ensure minimum value to avoid zero
         if (( $(echo "$result < 0.001" | bc -l) )); then
             result="0.001"
         fi
@@ -412,32 +390,31 @@ run_benchmark() {
     done
     
     local avg_time=$(echo "scale=6; $total_time / $NUM_RUNS" | bc)
-    # Format to 3 decimal places for display
     avg_time=$(printf "%.3f" "$avg_time")
     echo "    Average: ${avg_time}s"
     echo ""
     
-    # Store results for ranking (only for first test file)
     if [[ "$file" == "${TEST_FILES[0]}" ]]; then
         LANG_NAMES[RESULT_COUNT]="$lang"
         LANG_TIMES[RESULT_COUNT]="$avg_time"
         RESULT_COUNT=$((RESULT_COUNT + 1))
     fi
     
-    # Store all results for summary table
     ALL_RESULTS["${lang}:${file}"]="$avg_time"
 }
 
-# Main benchmark loop
 for TEST_FILE in "${TEST_FILES[@]}"; do
     echo "========================================="
     echo "Benchmarking with: $TEST_FILE ($(du -h $TEST_FILE | cut -f1))"
     echo "========================================="
     echo ""
     
-    # Run compiled languages first (typically fastest)
     if [ "$HAS_GCC" = "1" ]; then
         run_benchmark "C" "./wordcount_c" "$TEST_FILE"
+        
+        if [ -f "wordcount_hopt" ]; then
+            run_benchmark "C hyperopt" "./wordcount_hopt" "$TEST_FILE"
+        fi
     fi
     
     if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
@@ -458,33 +435,26 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
         fi
     fi
     
-    # Run interpreted languages
     if [ "$HAS_NODE" = "1" ]; then
         run_benchmark "JavaScript (Node.js)" "node --max-old-space-size=4096 --optimize-for-size wordcount.js" "$TEST_FILE"
     fi
     
     if [ "$HAS_PHP" = "1" ]; then
-        # Get file size in bytes
         FILE_SIZE_BYTES=$(stat -c%s "$TEST_FILE" 2>/dev/null || stat -f%z "$TEST_FILE" 2>/dev/null)
         
-        # PHP strategy: Use JIT for files > 10MB
         if [ "$FILE_SIZE_BYTES" -gt 10485760 ]; then
-            # Large file: JIT helps
             run_benchmark "PHP" "php -d opcache.enable_cli=1 -d opcache.jit=tracing -d opcache.jit_buffer_size=128M wordcount.php" "$TEST_FILE"
         else
-            # Small file: JIT adds overhead
             run_benchmark "PHP" "php wordcount.php" "$TEST_FILE"
         fi
     fi
     
-    # Validate results if requested
     if [ $VALIDATE -eq 1 ]; then
         validate_results "$TEST_FILE"
         echo ""
     fi
 done
 
-# Check for output files
 echo "========================================="
 echo "Output Files Generated:"
 echo "========================================="
@@ -495,24 +465,20 @@ for f in *_results.txt; do
 done
 echo ""
 
-# Summary with actual results
 echo "========================================="
 echo "Benchmark Complete!"
 echo "========================================="
 echo ""
 
-# Sort and display actual performance ranking
 if [ $RESULT_COUNT -gt 0 ]; then
     echo "Performance Ranking (${TEST_FILES[0]}):"
     echo "----------------------------------------"
     
-    # Create temporary file for sorting
     TEMP_RESULTS=$(mktemp)
     for ((i=0; i<RESULT_COUNT; i++)); do
         echo "${LANG_TIMES[$i]} ${LANG_NAMES[$i]}" >> "$TEMP_RESULTS"
     done
     
-    # Sort by time and display with ranking
     RANK=1
     BASELINE_TIME=""
     sort -n "$TEMP_RESULTS" | while read TIME LANG; do
@@ -532,7 +498,6 @@ if [ $RESULT_COUNT -gt 0 ]; then
     
     echo ""
     
-    # Show comparison table if multiple files were tested
     if [ ${#TEST_FILES[@]} -gt 1 ]; then
         echo "Performance Across File Sizes:"
         echo "----------------------------------------"
@@ -544,7 +509,6 @@ if [ $RESULT_COUNT -gt 0 ]; then
         echo ""
         echo "----------------------------------------"
         
-        # Display results for each language
         for ((i=0; i<RESULT_COUNT; i++)); do
             LANG="${LANG_NAMES[$i]}"
             printf "%-20s" "$LANG"
@@ -561,7 +525,6 @@ if [ $RESULT_COUNT -gt 0 ]; then
         echo ""
     fi
     
-    # Calculate performance spread
     if [ $RESULT_COUNT -gt 1 ]; then
         FASTEST="${LANG_TIMES[0]}"
         SLOWEST="${LANG_TIMES[0]}"
@@ -580,7 +543,6 @@ if [ $RESULT_COUNT -gt 0 ]; then
             echo "- Performance spread: ${SPREAD}x between fastest and slowest"
             echo "- Test system: $(uname -s) on $(uname -m)"
             
-            # Try to get CPU info
             if command -v lscpu &> /dev/null; then
                 echo "- CPU: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)"
             elif [ -f /proc/cpuinfo ]; then
@@ -594,7 +556,6 @@ if [ $RESULT_COUNT -gt 0 ]; then
         fi
     fi
     
-    # Clean up temp file
     rm -f "$TEMP_RESULTS"
 else
     echo "No benchmark results collected."
@@ -604,6 +565,9 @@ echo ""
 echo "To run individual tests:"
 if [ "$HAS_GCC" = "1" ]; then
     echo "  ./wordcount_c book.txt"
+    if [ -f "wordcount_hopt" ]; then
+        echo "  ./wordcount_hopt book.txt"
+    fi
 fi
 if [ "$HAS_RUST" = "1" ]; then
     echo "  ./wordcount_rust book.txt"
@@ -621,20 +585,16 @@ if [ "$HAS_PHP" = "1" ]; then
     echo "  php wordcount.php book.txt"
 fi
 
-# Clean up compiled files and test files
 echo ""
 echo "Clean up compiled files, test files, and build artifacts? (y/n)"
 read -r response
 if [[ "$response" =~ ^[Yy]$ ]]; then
-    # Remove compiled binaries
-    rm -f wordcount_rust wordcount_c wordcount_go wordcount_cs.exe
+    rm -f wordcount_rust wordcount_c wordcount_hopt wordcount_go wordcount_cs.exe
     rm -rf bin obj
     rm -f WordCount.csproj
     
-    # Remove test files (except the original book.txt)
     rm -f book_10mb.txt book_50mb.txt book_60mb.txt
     
-    # Remove result files
     rm -f *_results.txt
     
     echo "✓ Cleaned up all files"

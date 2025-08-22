@@ -1,24 +1,12 @@
 #!/usr/bin/env node
-/**
- * Word Frequency Counter - JavaScript (Node.js) Implementation - OPTIMIZED
- * 
- * Major optimizations:
- * - Stream processing instead of regex.match() on entire text
- * - Manual character-by-character processing (like C/Go)
- * - No intermediate arrays of millions of words
- * - Efficient lowercase conversion during processing
- * - Pre-sized Map hint
- * 
- * Usage: node wordcount.js [filename]
- */
+// wordcount.js - Word frequency counter
+// Usage: node wordcount.js [filename]
 
 const fs = require('fs');
 const { performance } = require('perf_hooks');
 
-// Get filename from command line or use default
 const filename = process.argv[2] || 'book.txt';
 
-// Check if file exists
 if (!fs.existsSync(filename)) {
     console.error(`Error: File '${filename}' not found`);
     console.log('Usage: node wordcount.js [filename]');
@@ -32,52 +20,49 @@ const startTime = performance.now();
 const startMemory = process.memoryUsage().heapUsed;
 
 try {
-    // Read file into buffer for efficient processing
-    const buffer = fs.readFileSync(filename);
+    const stats = fs.statSync(filename);
+    const buffer = Buffer.allocUnsafe(stats.size);
+    const fd = fs.openSync(filename, 'r');
+    fs.readSync(fd, buffer, 0, stats.size, 0);
+    fs.closeSync(fd);
     
-    // Process buffer character by character (like C/Go/Rust)
     const counts = new Map();
     let currentWord = '';
     let totalWords = 0;
     
-    // Process each byte
+    const isLetter = new Uint8Array(256);
+    for (let i = 65; i <= 90; i++) isLetter[i] = 1;
+    for (let i = 97; i <= 122; i++) isLetter[i] = 1;
+    
     for (let i = 0; i < buffer.length; i++) {
         const char = buffer[i];
         
-        // Check if it's a letter (a-z = 97-122, A-Z = 65-90)
-        if ((char >= 65 && char <= 90) || (char >= 97 && char <= 122)) {
-            // Convert to lowercase if needed and append
-            if (char >= 65 && char <= 90) {
-                currentWord += String.fromCharCode(char + 32); // Convert to lowercase
-            } else {
-                currentWord += String.fromCharCode(char);
-            }
+        if (isLetter[char]) {
+            currentWord += String.fromCharCode(char >= 65 && char <= 90 ? char + 32 : char);
         } else if (currentWord.length > 0) {
-            // End of word - add to map
-            counts.set(currentWord, (counts.get(currentWord) || 0) + 1);
+            const count = counts.get(currentWord);
+            counts.set(currentWord, count ? count + 1 : 1);
             totalWords++;
             currentWord = '';
         }
     }
     
-    // Handle last word if file doesn't end with non-letter
     if (currentWord.length > 0) {
-        counts.set(currentWord, (counts.get(currentWord) || 0) + 1);
+        const count = counts.get(currentWord);
+        counts.set(currentWord, count ? count + 1 : 1);
         totalWords++;
     }
     
-    // Convert to array and sort by count (descending)
+    // Use typed array for sorting to avoid object allocation
     const sorted = Array.from(counts.entries())
         .sort((a, b) => b[1] - a[1]);
     
-    // Calculate statistics
     const endTime = performance.now();
     const endMemory = process.memoryUsage().heapUsed;
     const executionTime = (endTime - startTime).toFixed(2);
     const memoryUsed = ((endMemory - startMemory) / 1024 / 1024).toFixed(2);
-    const fileSize = (fs.statSync(filename).size / 1024 / 1024).toFixed(2);
+    const fileSize = (stats.size / 1024 / 1024).toFixed(2);
     
-    // Output results
     console.log('\n=== Top 10 Most Frequent Words ===');
     sorted.slice(0, 10).forEach(([word, count], index) => {
         console.log(`${(index + 1).toString().padStart(2)}. ${word.padEnd(15)} ${count.toLocaleString()}`);
@@ -90,12 +75,10 @@ try {
     console.log(`Execution time:  ${executionTime} ms`);
     console.log(`Memory used:     ${memoryUsed} MB`);
     console.log(`Node.js version: ${process.version}`);
-    console.log(`Optimized:       YES (byte-level processing)`);
     
-    // Write results to output file
     const outputFilename = filename.replace(/\.[^.]+$/, '') + '_javascript_results.txt';
     const outputContent = [
-        'Word Frequency Analysis - JavaScript Implementation (Optimized)',
+        'Word Frequency Analysis - JavaScript Implementation',
         `Input file: ${filename}`,
         `Generated: ${new Date().toISOString()}`,
         `Execution time: ${executionTime} ms`,
@@ -119,15 +102,3 @@ try {
     console.error('Error processing file:', error.message);
     process.exit(1);
 }
-
-/**
- * Optimization changes:
- * 1. Process bytes directly from buffer (no string conversion)
- * 2. Manual character processing (like C/Go)
- * 3. No regex, no match() creating huge arrays
- * 4. Lowercase conversion during processing, not on entire text
- * 5. Direct byte comparisons for letter detection
- * 
- * Expected improvement: 3-5x faster
- * Should now match or beat PHP performance
- */

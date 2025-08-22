@@ -1,23 +1,10 @@
 #!/usr/bin/env php
 <?php
-/**
- * Word Frequency Counter - PHP Implementation
- * 
- * Optimized for performance while maintaining readability.
- * Best practices applied:
- * - Using built-in array functions for efficiency
- * - Single regex pass for word extraction
- * - Efficient sorting with arsort
- * - Memory tracking for comparison
- * 
- * Usage: php wordcount.php [filename]
- * If no filename provided, defaults to 'book.txt'
- */
+// wordcount.php - Word frequency counter
+// Usage: php wordcount.php [filename]
 
-// Get filename from command line or use default
 $filename = $argv[1] ?? 'book.txt';
 
-// Check if file exists
 if (!file_exists($filename)) {
     fwrite(STDERR, "Error: File '$filename' not found\n");
     echo "Usage: php wordcount.php [filename]\n\n";
@@ -28,23 +15,18 @@ if (!file_exists($filename)) {
 
 echo "Processing file: $filename\n";
 
-// Start timing and memory tracking
 $startTime = microtime(true);
 $startMemory = memory_get_usage(true);
 
 try {
-    // Read entire file (fastest for files that fit in memory)
     $text = file_get_contents($filename);
     
     if ($text === false) {
         throw new Exception("Failed to read file");
     }
     
-    // Convert to lowercase for case-insensitive counting
     $text = strtolower($text);
     
-    // Extract all words using regex
-    // \b ensures word boundaries, [a-z]+ matches only letters
     preg_match_all('/\b[a-z]+\b/', $text, $matches);
     
     if (empty($matches[0])) {
@@ -52,13 +34,10 @@ try {
         exit(0);
     }
     
-    // Count word frequencies using native array_count_values (very fast)
     $counts = array_count_values($matches[0]);
     
-    // Sort by count in descending order (arsort maintains key association)
     arsort($counts);
     
-    // Calculate statistics
     $endTime = microtime(true);
     $endMemory = memory_get_usage(true);
     $executionTime = number_format(($endTime - $startTime) * 1000, 2);
@@ -67,7 +46,6 @@ try {
     $totalWords = count($matches[0]);
     $uniqueWords = count($counts);
     
-    // Output results
     echo "\n=== Top 10 Most Frequent Words ===\n";
     $top10 = array_slice($counts, 0, 10, true);
     $index = 1;
@@ -87,13 +65,11 @@ try {
     echo "Memory used:     $memoryUsed MB\n";
     echo "PHP version:     " . PHP_VERSION . "\n";
     
-    // Enable these for better performance:
     if (!ini_get('opcache.enable_cli')) {
         echo "\nTip: Enable OPcache CLI for better performance:\n";
         echo "     php -d opcache.enable_cli=1 wordcount.php\n";
     }
     
-    // Write results to output file
     $outputFilename = preg_replace('/\.[^.]+$/', '', $filename) . '_php_results.txt';
     $output = fopen($outputFilename, 'w');
     if ($output) {
@@ -127,19 +103,3 @@ try {
     fwrite(STDERR, "Error processing file: " . $e->getMessage() . "\n");
     exit(1);
 }
-
-/**
- * Performance notes:
- * - array_count_values() is a native C function, very fast
- * - arsort() is more efficient than custom sorting
- * - file_get_contents() is fastest for files that fit in memory
- * - preg_match_all() with simple regex is well-optimized
- * 
- * For even better performance:
- * - Enable OPcache: php -d opcache.enable_cli=1 wordcount.php
- * - Use PHP 8.1+ with JIT: php -d opcache.jit=1205 wordcount.php
- * - For huge files (> 100MB), consider:
- *   - SplFileObject for line-by-line processing
- *   - Generators to reduce memory usage
- *   - mb_* functions for Unicode support
- */
