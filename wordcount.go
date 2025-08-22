@@ -133,8 +133,7 @@ func processFile(filename string) (map[string]int, int64, error) {
 	
 	// Process file in chunks
 	chunk := make([]byte, bufferSize)
-	wordBuf := make([]byte, maxWordLength)
-	leftover := make([]byte, 0, maxWordLength)
+	var leftover []byte
 	
 	for {
 		n, err := reader.Read(chunk)
@@ -145,63 +144,61 @@ func processFile(filename string) (map[string]int, int64, error) {
 			return nil, 0, err
 		}
 		
-		// Combine leftover from previous chunk
-		data := chunk[:n]
+		// Prepare data to process
+		var data []byte
 		if len(leftover) > 0 {
-			data = append(leftover, data...)
-			leftover = leftover[:0] // Clear leftover
+			// Combine leftover with new chunk
+			data = append(leftover, chunk[:n]...)
+			leftover = nil
+		} else {
+			data = chunk[:n]
 		}
 		
-		// Process the chunk
+		// Process the data
 		pos := 0
 		dataLen := len(data)
-		lastWordStart := -1
+		wordBuf := make([]byte, 0, maxWordLength)
 		
 		for pos < dataLen {
-			wordStartPos := pos
-			// Skip non-alpha to find word start
+			// Skip non-letters
 			for pos < dataLen && !isAlpha(data[pos]) {
 				pos++
 			}
 			
 			if pos >= dataLen {
-				break // No more words in this chunk
+				break
 			}
 			
-			// Mark the start of this word
-			lastWordStart = pos
+			// Start of a word
+			wordStart := pos
+			wordBuf = wordBuf[:0] // Reset buffer
 			
-			// Extract the word
-			word, newPos, found := extractWord(data, wordStartPos, wordBuf)
-			if found {
-				wordStr := string(word)
+			// Collect letters
+			for pos < dataLen && isAlpha(data[pos]) {
+				if len(wordBuf) < maxWordLength {
+					wordBuf = append(wordBuf, toLower(data[pos]))
+				}
+				pos++
+			}
+			
+			// Check if we reached the end while still in a word
+			if pos == dataLen && err != io.EOF && isAlpha(data[dataLen-1]) {
+				// We have a partial word, save it for next iteration
+				leftover = make([]byte, dataLen-wordStart)
+				copy(leftover, data[wordStart:])
+				break
+			}
+			
+			// Complete word found
+			if len(wordBuf) > 0 {
+				wordStr := string(wordBuf)
 				counts[wordStr]++
 				totalWords++
-			}
-			pos = newPos
-		}
-		
-		// FIXED: Check if we ended in the middle of a word
-		if lastWordStart >= 0 && lastWordStart < dataLen {
-			// Check if the last character is a letter (incomplete word)
-			if dataLen > 0 && isAlpha(data[dataLen-1]) {
-				// Save from the start of the last word
-				leftover = append(leftover[:0], data[lastWordStart:]...)
 			}
 		}
 		
 		if err == io.EOF {
 			break
-		}
-	}
-	
-	// Process any remaining leftover
-	if len(leftover) > 0 {
-		word, _, found := extractWord(leftover, 0, wordBuf)
-		if found {
-			wordStr := string(word)
-			counts[wordStr]++
-			totalWords++
 		}
 	}
 	
