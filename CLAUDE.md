@@ -4,104 +4,161 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Performance benchmark comparing word frequency counting across C, Rust, Go, C#, JavaScript, and PHP using byte-level text processing.
+This is a word frequency counter performance benchmark comparing implementations across C, Rust, Go, C#, JavaScript, and PHP. The project focuses on optimizing text processing performance, with a hyperoptimized C implementation achieving 4.67 GB/s throughput using AVX-512 SIMD, CRC32C hashing, and parallel processing.
 
-## Commands
+## Key Commands
 
-### Benchmarks
+### Building All Implementations
 ```bash
-# Install all dependencies (first time setup)
+# Install all dependencies (Ubuntu/WSL2)
 ./install-deps.sh
 
-# Run benchmark with default settings (3 runs per test)
-./bench.sh
+# Build C implementations
+gcc -O3 -march=native wordcount.c -o wordcount_c
+gcc -O3 -march=native -pthread wordcount_hyperopt.c -o wordcount_hopt -lm
 
-# Run benchmark with validation (verifies all implementations match)
-./bench.sh --validate
+# Build Rust
+rustc -O wordcount.rs -o wordcount_rust
+# Or with full optimizations:
+RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C lto=fat -C codegen-units=1" rustc wordcount.rs -o wordcount_rust_opt
 
-# Run benchmark with custom iteration count
-./bench.sh --runs=10
+# Build Go
+go build -o wordcount_go wordcount.go
 
-# Run benchmark with validation and custom runs
-./bench.sh --validate --runs=5
-```
-
-### Building
-```bash
-# C
-gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops wordcount.c -o wordcount_c
-
-# Rust
-rustc -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 wordcount.rs -o wordcount_rust
-
-# Go
-go build -gcflags="-B" -ldflags="-s -w" -o wordcount_go wordcount.go
-
-# C#
+# Build C# (.NET 8)
 dotnet build -c Release
 ```
 
-### Running
+### Running Benchmarks
+
 ```bash
-./wordcount_c book.txt
-./wordcount_rust book.txt
-GOGC=off ./wordcount_go book.txt
-./bin/Release/net8.0/WordCount book.txt
-node --max-old-space-size=4096 wordcount.js book.txt
-php -d opcache.enable_cli=1 -d opcache.jit=tracing wordcount.php book.txt
+# Quick benchmark (all languages, 3 runs)
+taskset -c 0-23 ./bench.sh --runs=3
+
+# Full benchmark (all languages, 10 runs)
+taskset -c 0-23 ./bench.sh --runs=10
+
+# Validation mode (ensures all implementations produce same results)
+taskset -c 0-23 ./bench.sh --validate --runs=3
+
+# C-only hyperoptimized benchmark (release mode)
+./bench_c.sh --hyperonly --large --runs=10 --pin=0-23
+
+# C-only with profiling and debugging
+./bench_c.sh -d --hyperonly --large --profile --events="cycles,instructions,cache-misses" --pin=0-23 --runs=3 --bundle
+
+# Thread count scanning for optimization
+./bench_c.sh --hyperonly --large --scan-threads=6,8,12,16 --runs=10 --pin=0-23
 ```
 
-### Testing
+### Running Individual Implementations
 ```bash
-# Download test file
-curl https://www.gutenberg.org/files/2701/2701-0.txt -o book.txt
+# C implementations
+./wordcount_c book.txt
+./wordcount_hopt book.txt
 
-# Clean up
-rm -f wordcount_rust wordcount_c wordcount_go
-rm -rf bin obj WordCount.csproj
-rm -f book_10mb.txt book_50mb.txt *_results.txt
+# Rust
+./wordcount_rust book.txt
+
+# Go (with GC disabled for better performance)
+GOGC=off ./wordcount_go book.txt
+
+# C#
+./bin/Release/net8.0/WordCount book.txt
+
+# JavaScript
+node wordcount.js book.txt
+
+# PHP
+php wordcount.php book.txt
 ```
 
 ## Architecture
 
-### Core Algorithm
-- Byte-level processing (raw bytes, not strings)
-- Manual word extraction (ASCII letters [a-zA-Z])
-- In-place lowercase conversion
-- Hash tables optimized per language
-- Single-pass file processing
+### File Structure
+- `wordcount.c` - Reference C implementation using FNV-1a hash
+- `wordcount_hyperopt.c` - Hyperoptimized C with AVX-512, CRC32C, parallel processing
+- `wordcount.rs` - Rust implementation with FNV HashMap
+- `wordcount.go` - Go implementation with 64KB buffer streaming
+- `WordCount.cs` - C# implementation with pre-sized dictionary
+- `wordcount.js` - JavaScript with direct buffer processing
+- `wordcount.php` - PHP using regex extraction
 
-### Language Specifics
+### Key Design Decisions
 
-**C**: FNV-1a hash, custom hash table, 8KB buffer
-**Rust**: Custom FNV hasher, zero-copy strings, pre-sized HashMap
-**Go**: 64KB buffer, buffer boundary handling, unsafe string conversions
-**C#**: UTF-8 BOM handling, pre-sized Dictionary
-**JavaScript**: Direct buffer processing, no regex
-**PHP**: PCRE regex `\b[a-z]+\b`, array_count_values()
+1. **Word Definition**: All implementations except PHP use byte-level processing (ASCII letters [a-zA-Z]). PHP uses regex word boundaries.
 
-### Key Details
+2. **Hash Table Strategy**: 
+   - C hyperopt: Open addressing with linear probing, 16-bit fingerprints
+   - C reference: Custom hash table with FNV-1a
+   - Others: Language-native hash maps
 
-- Word definition: ASCII letters [a-zA-Z] (except PHP uses regex boundaries)
-- C implementation is reference for validation
-- `--validate` flag verifies consistency
-- Each implementation outputs `*_results.txt`
+3. **Parallelization**: Only `wordcount_hyperopt.c` uses multi-threading (configurable, default 6 threads)
 
-## Development Notes
+4. **Memory Management**:
+   - C hyperopt: Per-thread memory pools (32MB pre-allocated)
+   - Streaming: C and Go use buffered streaming
+   - Full load: Rust, JS, C#, PHP load entire file
 
-- C implementation is the reference
-- Validate changes with `./bench.sh --validate`
-- Use GOGC=off for Go benchmarks
-- PHP word count differs due to regex boundaries (expected)
+### Performance Critical Paths
 
-## Performance
+1. **AVX-512 Processing** (`wordcount_hyperopt.c`):
+   - `process_chunk_avx512()` - Processes 64 bytes per iteration
+   - Falls back to scalar for non-AVX-512 systems
 
-Expected results (5.3MB file, ~900K words):
-- Rust: ~20ms
-- C: ~22ms  
-- Go: ~30ms
-- PHP: ~52ms
-- JavaScript: ~90ms
-- C#: ~90ms
+2. **CRC32C Hashing** (`wordcount_hyperopt.c`):
+   - Hardware CRC32 instructions via SSE4.2
+   - Incremental computation during word extraction
 
-All scale linearly O(n).
+3. **V-Cache Optimization** (`wordcount_hyperopt.c`):
+   - Auto-detects AMD V-Cache topology
+   - Pins threads to optimal cores
+
+## Test Files
+
+- `book.txt` - 5.3MB test file (~900K words)
+- `book2.txt` - 53MB test file (if present)
+- `book3.txt` - 261MB test file (if present)
+
+Use `--large` flag with `bench_c.sh` to test all three files.
+
+## Optimization Flags
+
+- **C Hyperopt**: `-O3 -march=native -pthread` (or `-march=znver5` with GCC 14+)
+- **C Reference**: `-O3 -march=native -flto`
+- **Rust**: `-C opt-level=3 -C target-cpu=native -C lto=fat`
+- **Go**: Build with standard flags, run with `GOGC=off`
+- **C#**: Release configuration
+- **JavaScript**: Run with `--max-old-space-size=4096` if needed
+- **PHP**: Ensure `opcache.jit=tracing` is enabled
+
+## Debugging and Profiling
+
+### C Implementation Debugging
+```bash
+# Build debug version with sanitizers
+gcc -g -O0 -fsanitize=address -DDEBUG wordcount.c -o wordcount_debug
+
+# Profile with perf
+perf stat -e cycles,instructions,cache-misses ./wordcount_hopt book.txt
+
+# Generate detailed debug bundle
+./bench_c.sh -d --profile --bundle
+```
+
+### Validation
+All implementations except PHP should produce exactly 928,012 words for `book.txt`. PHP produces 927,930 due to regex boundary differences.
+
+## Performance Targets
+
+- **C Hyperopt**: Target 3.0+ GB/s on large files (currently achieves 4.67 GB/s)
+- **Standard implementations**: Within 3x of C reference implementation
+- **Consistency**: Standard deviation < 5ms for small files
+
+## Thread Count Optimization
+
+For `wordcount_hyperopt.c`, optimal thread counts vary by file size:
+- Small files (5.3MB): 6 threads optimal
+- Large files (261MB): 12 threads optimal
+
+Use `--scan-threads` flag to find optimal configuration for your system.
