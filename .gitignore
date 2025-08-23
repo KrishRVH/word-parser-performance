@@ -5,3 +5,4 @@ obj/
 wordcount_c
 wordcount_go
 wordcount_rust
+.idea/
