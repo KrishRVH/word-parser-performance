@@ -1,6 +1,12 @@
 #!/bin/bash
 # bench.sh - Performance benchmark
 # Usage: ./bench.sh [--validate] [--runs=N]
+# Notes:
+#  - C hyperopt builds: 6-thread and 12-thread by default (best on WSL2)
+#  - Uses GCC >=14 with -march=znver5/-mtune=znver5 if available; falls back to -march=native
+#  - Stable timing/formatting under C locale
+
+export LC_ALL=C LANG=C
 
 VALIDATE=0
 NUM_RUNS=3
@@ -37,7 +43,7 @@ echo "Runs per test: $NUM_RUNS"
 echo ""
 
 check_dependency() {
-    if ! command -v $1 &> /dev/null; then
+    if ! command -v "$1" &> /dev/null; then
         echo "✗ $1 is not installed"
         return 1
     else
@@ -93,11 +99,10 @@ create_test_file() {
     local size=$1
     local filename=$2
     local multiplier=$3
-    
     if [ ! -f "$filename" ]; then
         echo "Creating $size test file..."
         > "$filename"
-        for i in $(seq 1 $multiplier); do
+        for _ in $(seq 1 "$multiplier"); do
             cat book.txt >> "$filename"
         done
         echo "✓ Created $filename"
@@ -115,36 +120,59 @@ else
 fi
 echo ""
 
+# Determine best arch flags for hyperopt
+GCC_MAJ=""
+if [ "$HAS_GCC" = "1" ]; then
+    GCC_MAJ=$(gcc -dumpfullversion -dumpversion 2>/dev/null | cut -d. -f1)
+fi
+AVX_FLAGS="-mavx512f -mavx512bw -mavx512vl -msse4.2"
+if [ -n "$GCC_MAJ" ] && [ "$GCC_MAJ" -ge 14 ]; then
+    MARCH_FLAGS="-march=znver5 -mtune=znver5 $AVX_FLAGS"
+else
+    MARCH_FLAGS="-march=native -mtune=native"
+fi
+
 if [ "$HAS_RUST" = "1" ]; then
     echo "Compiling Rust version..."
-    rustc -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 wordcount.rs -o wordcount_rust 2>rust_error.log
+    rustc -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 \
+        wordcount.rs -o wordcount_rust 2>rust_error.log
     if [ $? -eq 0 ]; then
         echo "✓ Rust compilation successful"
         rm -f rust_error.log
     else
         echo "✗ Rust compilation failed"
-        cat rust_error.log | head -10
+        head -10 rust_error.log
         echo ""
         HAS_RUST=0
     fi
 fi
 
 if [ "$HAS_GCC" = "1" ]; then
-    echo "Compiling C version..."
-    gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops wordcount.c -o wordcount_c 2>/dev/null
+    echo "Compiling C reference..."
+    gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops \
+        wordcount.c -o wordcount_c 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "✓ C compilation successful"
     else
         echo "✗ C compilation failed"
         HAS_GCC=0
     fi
-    
-    echo "Compiling C hyperopt version (8 threads by default)..."
-    gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops -pthread wordcount_hyperopt.c -o wordcount_hopt -lm 2>/dev/null
+
+    echo "Compiling C hyperopt (6-thread and 12-thread)..."
+    gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
+        -DNUM_THREADS=6 wordcount_hyperopt.c -o wordcount_hopt_t6 -lm 2>/dev/null
     if [ $? -eq 0 ]; then
-        echo "✓ C hyperopt compilation successful (optimized for 8 threads)"
+        echo "✓ C hyperopt 6-thread successful"
     else
-        echo "✗ C hyperopt compilation failed"
+        echo "✗ C hyperopt 6-thread failed"
+    fi
+
+    gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
+        -DNUM_THREADS=12 wordcount_hyperopt.c -o wordcount_hopt_t12 -lm 2>/dev/null
+    if [ $? -eq 0 ]; then
+        echo "✓ C hyperopt 12-thread successful"
+    else
+        echo "✗ C hyperopt 12-thread failed"
     fi
 fi
 
@@ -178,7 +206,6 @@ if [ "$HAS_DOTNET" = "1" ]; then
 </Project>
 EOF
     fi
-    
     dotnet build -c Release --nologo --verbosity quiet 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "✓ C# build successful"
@@ -201,12 +228,12 @@ extract_counts_from_output() {
 validate_results() {
     local file=$1
     local base_name="${file%.txt}"
-    
+
     echo "  Validating results for $file..."
     local c_counts=""
     local expected_total=0
     local expected_unique=0
-    
+
     if [ "$HAS_GCC" = "1" ] && [ -f "wordcount_c" ]; then
         c_counts=$(extract_counts_from_output "./wordcount_c" "$file")
         expected_total=$(echo $c_counts | cut -d' ' -f1)
@@ -216,15 +243,32 @@ validate_results() {
         echo "    ⚠ C implementation not available for reference"
         return
     fi
-    
+
     declare -a languages
     declare -a total_counts
     declare -a unique_counts
-    
+
     languages+=("C (ref)")
     total_counts+=("$expected_total")
     unique_counts+=("$expected_unique")
-    
+
+    if [ "$HAS_GCC" = "1" ] && [ -f "wordcount_hopt_t6" ]; then
+        counts=$(extract_counts_from_output "./wordcount_hopt_t6" "$file")
+        total=$(echo $counts | cut -d' ' -f1)
+        unique=$(echo $counts | cut -d' ' -f2)
+        languages+=("C hyperopt (6-thread)")
+        total_counts+=("$total")
+        unique_counts+=("$unique")
+    fi
+    if [ "$HAS_GCC" = "1" ] && [ -f "wordcount_hopt_t12" ]; then
+        counts=$(extract_counts_from_output "./wordcount_hopt_t12" "$file")
+        total=$(echo $counts | cut -d' ' -f1)
+        unique=$(echo $counts | cut -d' ' -f2)
+        languages+=("C hyperopt (12-thread)")
+        total_counts+=("$total")
+        unique_counts+=("$unique")
+    fi
+
     if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
         counts=$(extract_counts_from_output "./wordcount_rust" "$file")
         total=$(echo $counts | cut -d' ' -f1)
@@ -233,7 +277,7 @@ validate_results() {
         total_counts+=("$total")
         unique_counts+=("$unique")
     fi
-    
+
     if [ "$HAS_GO" = "1" ] && [ -f "wordcount_go" ]; then
         counts=$(extract_counts_from_output "./wordcount_go" "$file")
         total=$(echo $counts | cut -d' ' -f1)
@@ -242,7 +286,7 @@ validate_results() {
         total_counts+=("$total")
         unique_counts+=("$unique")
     fi
-    
+
     if [ "$HAS_DOTNET" = "1" ] && [ -f "bin/Release/net8.0/WordCount" ]; then
         counts=$(extract_counts_from_output "./bin/Release/net8.0/WordCount" "$file")
         total=$(echo $counts | cut -d' ' -f1)
@@ -251,7 +295,7 @@ validate_results() {
         total_counts+=("$total")
         unique_counts+=("$unique")
     fi
-    
+
     if [ "$HAS_NODE" = "1" ] && [ -f "wordcount.js" ]; then
         counts=$(extract_counts_from_output "node wordcount.js" "$file")
         total=$(echo $counts | cut -d' ' -f1)
@@ -260,7 +304,7 @@ validate_results() {
         total_counts+=("$total")
         unique_counts+=("$unique")
     fi
-    
+
     if [ "$HAS_PHP" = "1" ] && [ -f "wordcount.php" ]; then
         counts=$(extract_counts_from_output "php wordcount.php" "$file")
         total=$(echo $counts | cut -d' ' -f1)
@@ -269,36 +313,35 @@ validate_results() {
         total_counts+=("$total")
         unique_counts+=("$unique")
     fi
-    
+
     echo "    Word count comparison:"
     local all_match=1
     for i in "${!languages[@]}"; do
         if [ $i -eq 0 ]; then
-            printf "      %-15s: %d total, %d unique (reference)\n" \
+            printf "      %-20s: %d total, %d unique (reference)\n" \
                 "${languages[$i]}" "${total_counts[$i]}" "${unique_counts[$i]}"
         else
             local diff_total=$((${total_counts[$i]} - expected_total))
             local diff_unique=$((${unique_counts[$i]} - expected_unique))
-            
             if [ "${total_counts[$i]}" = "$expected_total" ] && [ "${unique_counts[$i]}" = "$expected_unique" ]; then
-                printf "      %-15s: ✓ Exact match\n" "${languages[$i]}"
+                printf "      %-20s: ✓ Exact match\n" "${languages[$i]}"
             else
                 all_match=0
                 if [ -n "${total_counts[$i]}" ] && [ -n "${unique_counts[$i]}" ]; then
-                    printf "      %-15s: ⚠ Total: %d (%+d), Unique: %d (%+d)\n" \
+                    printf "      %-20s: ⚠ Total: %d (%+d), Unique: %d (%+d)\n" \
                         "${languages[$i]}" "${total_counts[$i]}" "$diff_total" \
                         "${unique_counts[$i]}" "$diff_unique"
                 else
-                    printf "      %-15s: ✗ Failed to get counts\n" "${languages[$i]}"
+                    printf "      %-20s: ✗ Failed to get counts\n" "${languages[$i]}"
                 fi
             fi
         fi
     done
-    
+
     echo "    Top words consistency check:"
-    local temp_dir=$(mktemp -d)
+    local temp_dir
+    temp_dir=$(mktemp -d)
     declare -a result_files
-    
     [ -f "${base_name}_c_results.txt" ] && result_files+=("${base_name}_c_results.txt")
     [ -f "${base_name}_c-hopt_results.txt" ] && result_files+=("${base_name}_c-hopt_results.txt")
     [ -f "${base_name}_rust_results.txt" ] && result_files+=("${base_name}_rust_results.txt")
@@ -306,36 +349,27 @@ validate_results() {
     [ -f "${base_name}_csharp_results.txt" ] && result_files+=("${base_name}_csharp_results.txt")
     [ -f "${base_name}_javascript_results.txt" ] && result_files+=("${base_name}_javascript_results.txt")
     [ -f "${base_name}_php_results.txt" ] && result_files+=("${base_name}_php_results.txt")
-    
+
     if [ ${#result_files[@]} -ge 2 ]; then
         for i in "${!result_files[@]}"; do
             grep -E '^\s*[0-9]+[\.\s]' "${result_files[$i]}" | \
-                head -10 | \
-                sed 's/[,]//g' | \
+                head -10 | sed 's/[,]//g' | \
                 awk '{
-                    word = ""
-                    count = ""
+                    word = ""; count = "";
                     for(i=1; i<=NF; i++) {
-                        if ($i ~ /^[0-9]+$/ && i > 1) {
-                            count = $i
-                        } else if ($i !~ /^[0-9]+\.?$/ && word == "") {
-                            word = $i
-                        }
+                        if ($i ~ /^[0-9]+$/ && i > 1) { count = $i }
+                        else if ($i !~ /^[0-9]+\.?$/ && word == "") { word = $i }
                     }
                     if (word != "" && count != "") print word, count
                 }' | sort > "$temp_dir/results_$i.txt"
         done
-        
         local reference_file="$temp_dir/results_0.txt"
         local top_words_match=1
-        
         for ((i=1; i<${#result_files[@]}; i++)); do
             if ! cmp -s "$reference_file" "$temp_dir/results_$i.txt"; then
-                top_words_match=0
-                break
+                top_words_match=0; break
             fi
         done
-        
         if [ $top_words_match -eq 1 ]; then
             echo "      ✓ All implementations have identical top 10 words"
         else
@@ -344,9 +378,8 @@ validate_results() {
     else
         echo "      ⚠ Not enough result files to compare"
     fi
-    
     rm -rf "$temp_dir"
-    
+
     if [ $all_match -eq 1 ]; then
         echo "    ✓ Perfect validation: All implementations match C reference"
     else
@@ -363,50 +396,40 @@ run_benchmark() {
     local lang=$1
     local cmd=$2
     local file=$3
-    
+
     echo "  $lang:"
-    
+    # Warm up once
     $cmd "$file" > /dev/null 2>&1
-    
+
     local total_time=0
     for ((run=1; run<=NUM_RUNS; run++)); do
-        # Try to extract high-precision timing from the program itself first
-        local exec_time=$($cmd "$file" 2>&1 | grep -E "(Execution time:|Elapsed time:)" | grep -oE "[0-9]+\.?[0-9]*" | head -1)
-        
+        local exec_time
+        exec_time=$($cmd "$file" 2>&1 | grep -E "(Execution time:|Elapsed time:)" | grep -oE "[0-9]+\.?[0-9]*" | head -1)
+        local result=""
         if [ -n "$exec_time" ]; then
-            # Check if the output contains "ms" to determine units
-            local has_ms=$($cmd "$file" 2>&1 | grep -E "(Execution time:|Elapsed time:)" | grep -q "ms" && echo "1" || echo "0")
-            
-            if [ "$has_ms" = "1" ] || (( $(echo "$exec_time < 1000 && $exec_time > 1" | bc -l) )); then
-                # Time is in milliseconds, convert to seconds
-                local result=$(echo "scale=6; $exec_time / 1000" | bc)
+            # Guess unit: assume milliseconds unless very large
+            if (( $(echo "$exec_time < 1000 && $exec_time > 1" | bc -l) )); then
+                result=$(echo "scale=6; $exec_time / 1000" | bc)
             else
-                # Time is already in seconds
-                local result=$exec_time
+                result="$exec_time"
             fi
         elif command -v /usr/bin/time &> /dev/null; then
-            # Use high-precision time format
-            local result=$(/usr/bin/time -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
+            result=$(/usr/bin/time -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         elif command -v gtime &> /dev/null; then
-            local result=$(gtime -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
+            result=$(gtime -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
         else
-            # Fallback to nanosecond precision
-            local start=$(date +%s%N)
+            local start end
+            start=$(date +%s%N)
             $cmd "$file" > /dev/null 2>&1
-            local end=$(date +%s%N)
-            local result=$(echo "scale=6; ($end - $start) / 1000000000" | bc)
+            end=$(date +%s%N)
+            result=$(echo "scale=6; ($end - $start) / 1000000000" | bc)
         fi
-        
-        if (( $(echo "$result < 0.001" | bc -l) )); then
-            result="0.001"
-        fi
-        
+        if (( $(echo "$result < 0.001" | bc -l) )); then result="0.001"; fi
         total_time=$(echo "scale=6; $total_time + $result" | bc)
         printf "    Run %d: %.3fs\n" "$run" "$result"
     done
-    
+
     local avg_time=$(echo "scale=6; $total_time / $NUM_RUNS" | bc)
-    # Keep full precision for small times
     if (( $(echo "$avg_time < 0.1" | bc -l) )); then
         avg_time=$(printf "%.4f" "$avg_time")
     else
@@ -414,40 +437,33 @@ run_benchmark() {
     fi
     echo "    Average: ${avg_time}s"
     echo ""
-    
+
     if [[ "$file" == "${TEST_FILES[0]}" ]]; then
         LANG_NAMES[RESULT_COUNT]="$lang"
         LANG_TIMES[RESULT_COUNT]="$avg_time"
         RESULT_COUNT=$((RESULT_COUNT + 1))
     fi
-    
+
     ALL_RESULTS["${lang}:${file}"]="$avg_time"
 }
 
 for TEST_FILE in "${TEST_FILES[@]}"; do
     echo "========================================="
-    echo "Benchmarking with: $TEST_FILE ($(du -h $TEST_FILE | cut -f1))"
+    echo "Benchmarking with: $TEST_FILE ($(du -h "$TEST_FILE" | cut -f1))"
     echo "========================================="
     echo ""
-    
+
     if [ "$HAS_GCC" = "1" ]; then
-        run_benchmark "C" "./wordcount_c" "$TEST_FILE"
-        
-        if [ -f "wordcount_hopt" ]; then
-            run_benchmark "C hyperopt (8-thread)" "./wordcount_hopt" "$TEST_FILE"
-        fi
+        [ -f "wordcount_c" ] && run_benchmark "C" "./wordcount_c" "$TEST_FILE"
+        [ -f "wordcount_hopt_t6" ] && run_benchmark "C hyperopt (6-thread)" "./wordcount_hopt_t6" "$TEST_FILE"
+        [ -f "wordcount_hopt_t12" ] && run_benchmark "C hyperopt (12-thread)" "./wordcount_hopt_t12" "$TEST_FILE"
     fi
-    
     if [ "$HAS_RUST" = "1" ] && [ -f "wordcount_rust" ]; then
         run_benchmark "Rust" "./wordcount_rust" "$TEST_FILE"
     fi
-    
     if [ "$HAS_GO" = "1" ] && [ -f "wordcount_go" ]; then
-        export GOGC=off
-        run_benchmark "Go" "./wordcount_go" "$TEST_FILE"
-        unset GOGC
+        GOGC=off run_benchmark "Go" "./wordcount_go" "$TEST_FILE"
     fi
-    
     if [ "$HAS_DOTNET" = "1" ]; then
         if [ -f "bin/Release/net8.0/WordCount" ]; then
             DOTNET_TieredCompilation=0 run_benchmark "C# (.NET)" "./bin/Release/net8.0/WordCount" "$TEST_FILE"
@@ -455,21 +471,18 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
             run_benchmark "C# (Mono)" "./wordcount_cs.exe" "$TEST_FILE"
         fi
     fi
-    
     if [ "$HAS_NODE" = "1" ]; then
         run_benchmark "JavaScript (Node.js)" "node --max-old-space-size=4096 --optimize-for-size wordcount.js" "$TEST_FILE"
     fi
-    
     if [ "$HAS_PHP" = "1" ]; then
         FILE_SIZE_BYTES=$(stat -c%s "$TEST_FILE" 2>/dev/null || stat -f%z "$TEST_FILE" 2>/dev/null)
-        
         if [ "$FILE_SIZE_BYTES" -gt 10485760 ]; then
             run_benchmark "PHP" "php -d opcache.enable_cli=1 -d opcache.jit=tracing -d opcache.jit_buffer_size=128M wordcount.php" "$TEST_FILE"
         else
             run_benchmark "PHP" "php wordcount.php" "$TEST_FILE"
         fi
     fi
-    
+
     if [ $VALIDATE -eq 1 ]; then
         validate_results "$TEST_FILE"
         echo ""
@@ -494,45 +507,42 @@ echo ""
 if [ $RESULT_COUNT -gt 0 ]; then
     echo "Performance Ranking (${TEST_FILES[0]}):"
     echo "----------------------------------------"
-    
     TEMP_RESULTS=$(mktemp)
     for ((i=0; i<RESULT_COUNT; i++)); do
         echo "${LANG_TIMES[$i]} ${LANG_NAMES[$i]}" >> "$TEMP_RESULTS"
     done
-    
     RANK=1
     BASELINE_TIME=""
     sort -n "$TEMP_RESULTS" | while read TIME LANG; do
         if [ -z "$BASELINE_TIME" ]; then
             BASELINE_TIME="$TIME"
-            printf "%d. %-20s %8.3fs (baseline)\n" "$RANK" "$LANG" "$TIME"
+            printf "%d. %-24s %8.3fs (baseline)\n" "$RANK" "$LANG" "$TIME"
         else
             if (( $(echo "$BASELINE_TIME > 0" | bc -l) )); then
                 SLOWDOWN=$(echo "scale=1; $TIME / $BASELINE_TIME" | bc)
-                printf "%d. %-20s %8.3fs (%.1fx slower)\n" "$RANK" "$LANG" "$TIME" "$SLOWDOWN"
+                printf "%d. %-24s %8.3fs (%.1fx slower)\n" "$RANK" "$LANG" "$TIME" "$SLOWDOWN"
             else
-                printf "%d. %-20s %8.3fs\n" "$RANK" "$LANG" "$TIME"
+                printf "%d. %-24s %8.3fs\n" "$RANK" "$LANG" "$TIME"
             fi
         fi
         RANK=$((RANK + 1))
     done
-    
+    rm -f "$TEMP_RESULTS"
     echo ""
-    
+
     if [ ${#TEST_FILES[@]} -gt 1 ]; then
         echo "Performance Across File Sizes:"
         echo "----------------------------------------"
-        printf "%-20s" "Language"
+        printf "%-24s" "Language"
         for FILE in "${TEST_FILES[@]}"; do
             SIZE=$(du -h "$FILE" | cut -f1)
             printf " %10s" "$SIZE"
         done
         echo ""
         echo "----------------------------------------"
-        
         for ((i=0; i<RESULT_COUNT; i++)); do
             LANG="${LANG_NAMES[$i]}"
-            printf "%-20s" "$LANG"
+            printf "%-24s" "$LANG"
             for FILE in "${TEST_FILES[@]}"; do
                 TIME="${ALL_RESULTS["${LANG}:${FILE}"]}"
                 if [ -n "$TIME" ]; then
@@ -545,39 +555,29 @@ if [ $RESULT_COUNT -gt 0 ]; then
         done
         echo ""
     fi
-    
+
     if [ $RESULT_COUNT -gt 1 ]; then
-        FASTEST="${LANG_TIMES[0]}"
-        SLOWEST="${LANG_TIMES[0]}"
+        FASTEST="${LANG_TIMES[0]}"; SLOWEST="${LANG_TIMES[0]}"
         for ((i=1; i<RESULT_COUNT; i++)); do
-            if (( $(echo "${LANG_TIMES[$i]} < $FASTEST" | bc -l) )); then
-                FASTEST="${LANG_TIMES[$i]}"
-            fi
-            if (( $(echo "${LANG_TIMES[$i]} > $SLOWEST" | bc -l) )); then
-                SLOWEST="${LANG_TIMES[$i]}"
-            fi
+            if (( $(echo "${LANG_TIMES[$i]} < $FASTEST" | bc -l) )); then FASTEST="${LANG_TIMES[$i]}"; fi
+            if (( $(echo "${LANG_TIMES[$i]} > $SLOWEST" | bc -l) )); then SLOWEST="${LANG_TIMES[$i]}"; fi
         done
-        
         if (( $(echo "$FASTEST > 0" | bc -l) )); then
             SPREAD=$(echo "scale=1; $SLOWEST / $FASTEST" | bc)
             echo "Key Insights:"
             echo "- Performance spread: ${SPREAD}x between fastest and slowest"
             echo "- Test system: $(uname -s) on $(uname -m)"
-            
             if command -v lscpu &> /dev/null; then
-                echo "- CPU: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)"
+                echo "- CPU: $(lscpu | grep -m1 'Model name' | cut -d: -f2 | xargs)"
             elif [ -f /proc/cpuinfo ]; then
-                echo "- CPU: $(grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)"
+                echo "- CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
             fi
-            
             if [ $VALIDATE -eq 1 ]; then
                 echo ""
                 echo "- Validation: Using C implementation as reference"
             fi
         fi
     fi
-    
-    rm -f "$TEMP_RESULTS"
 else
     echo "No benchmark results collected."
 fi
@@ -585,38 +585,25 @@ echo ""
 
 echo "To run individual tests:"
 if [ "$HAS_GCC" = "1" ]; then
-    echo "  ./wordcount_c book.txt          # Reference C implementation"
-    if [ -f "wordcount_hopt" ]; then
-        echo "  ./wordcount_hopt book.txt       # Hyperoptimized C (8 threads)"
-    fi
+    echo "  ./wordcount_c book.txt            # Reference C implementation"
+    [ -f "wordcount_hopt_t6" ]  && echo "  ./wordcount_hopt_t6 book.txt     # C hyperopt (6-thread)"
+    [ -f "wordcount_hopt_t12" ] && echo "  ./wordcount_hopt_t12 book.txt    # C hyperopt (12-thread)"
 fi
-if [ "$HAS_RUST" = "1" ]; then
-    echo "  ./wordcount_rust book.txt"
-fi
-if [ "$HAS_GO" = "1" ]; then
-    echo "  GOGC=off ./wordcount_go book.txt"
-fi
-if [ "$HAS_DOTNET" = "1" ]; then
-    echo "  ./bin/Release/net8.0/WordCount book.txt"
-fi
-if [ "$HAS_NODE" = "1" ]; then
-    echo "  node wordcount.js book.txt"
-fi
-if [ "$HAS_PHP" = "1" ]; then
-    echo "  php wordcount.php book.txt"
-fi
-
+[ "$HAS_RUST" = "1" ]   && echo "  ./wordcount_rust book.txt"
+[ "$HAS_GO" = "1" ]     && echo "  GOGC=off ./wordcount_go book.txt"
+[ "$HAS_DOTNET" = "1" ] && echo "  ./bin/Release/net8.0/WordCount book.txt"
+[ "$HAS_NODE" = "1" ]   && echo "  node wordcount.js book.txt"
+[ "$HAS_PHP" = "1" ]    && echo "  php wordcount.php book.txt"
 echo ""
+
 echo "Clean up compiled files, test files, and build artifacts? (y/n)"
 read -r response
 if [[ "$response" =~ ^[Yy]$ ]]; then
-    rm -f wordcount_rust wordcount_c wordcount_hopt wordcount_go wordcount_cs.exe
+    rm -f wordcount_rust wordcount_c wordcount_go wordcount_cs.exe
+    rm -f wordcount_hopt_t6 wordcount_hopt_t12
     rm -rf bin obj
     rm -f WordCount.csproj
-    
     rm -f book_10mb.txt book_50mb.txt book_60mb.txt
-    
     rm -f *_results.txt
-    
     echo "✓ Cleaned up all files"
 fi

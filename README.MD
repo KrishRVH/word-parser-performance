@@ -8,10 +8,17 @@ A comprehensive performance comparison of text processing across C, Rust, Go, C#
 # Install dependencies (Ubuntu/WSL2)
 ./install-deps.sh
 
-# Run benchmark
-./bench.sh              # Run benchmark only
-./bench.sh --validate   # Run with result validation
-./bench.sh --runs=10    # Run with 10 iterations per test
+bench_c.sh (release):
+./bench_c.sh --hyperonly --large --runs=10 --pin=0-23
+
+bench_c.sh (full debug + perf + bundle):
+./bench_c.sh -d --hyperonly --large --profile --events="cycles,instructions,cache-misses,LLC-loads,LLC-load-misses" --pin=0-23 --runs=3 --bundle
+
+bench.sh (release):
+taskset -c 0-23 ./bench.sh --runs=10
+
+bench.sh (debug/validation):
+taskset -c 0-23 ./bench.sh --validate --runs=3
 ```
 
 ## Performance Results
