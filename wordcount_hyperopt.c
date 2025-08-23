@@ -799,39 +799,63 @@ int main(int argc, char* argv[]) {
     if (data == MAP_FAILED) { perror("mmap"); close(fd); return 1; }
     TIMING_END(mmap, "mmap");
 
+    // Compute non-overlapping cuts aligned to separators
+    size_t cuts[NUM_THREADS + 1];
+    cuts[0] = 0;
+    cuts[NUM_THREADS] = file_size;
+    size_t approx = file_size / NUM_THREADS;
+    for (int i = 1; i < NUM_THREADS; i++) {
+        size_t c = i * approx;
+        while (c < file_size && is_ascii_letter((unsigned char)data[c])) {
+            c++;
+        }
+        cuts[i] = c;
+    }
+
+    // Advise kernel about access pattern
     madvise(data, file_size, MADV_SEQUENTIAL | MADV_WILLNEED);
 
+    // Initialize per-thread tables (size by actual slice)
     TIMING_START(init);
     for (int i = 0; i < NUM_THREADS; i++) {
-        size_t chunk_size = file_size / NUM_THREADS;
+        size_t chunk_size = cuts[i + 1] - cuts[i];              // use cuts
         size_t estimated_words = chunk_size / 5;
         size_t estimated_unique = estimated_words / 10;
+
         tables[i].capacity = next_pow2(estimated_unique * 2);
-        if (tables[i].capacity < INITIAL_CAPACITY) tables[i].capacity = INITIAL_CAPACITY;
+        if (tables[i].capacity < INITIAL_CAPACITY)
+            tables[i].capacity = INITIAL_CAPACITY;
+
         tables[i].entries = MEMORY_ALLOC_ALIGNED(CACHELINE, tables[i].capacity * sizeof(Entry));
         memset(tables[i].entries, 0, tables[i].capacity * sizeof(Entry));
         tables[i].string_pool = MEMORY_ALLOC_ALIGNED(CACHELINE, STRING_POOL_SIZE);
-        tables[i].pool_used = 0; tables[i].size = 0; tables[i].total_words = 0;
-        tables[i].thread_id = i; tables[i].malloc_words = NULL; tables[i].malloc_count = 0; tables[i].malloc_cap = 0;
+        tables[i].pool_used = 0;
+        tables[i].size = 0;
+        tables[i].total_words = 0;
+        tables[i].thread_id = i;
+        tables[i].malloc_words = NULL;
+        tables[i].malloc_count = 0;
+        tables[i].malloc_cap = 0;
+
         madvise(tables[i].entries, tables[i].capacity * sizeof(Entry), MADV_HUGEPAGE);
         madvise(tables[i].string_pool, STRING_POOL_SIZE, MADV_HUGEPAGE);
     }
     TIMING_END(init, "init");
 
+    // Launch threads using the non-overlapping cuts
     pthread_barrier_init(&barrier, NULL, NUM_THREADS + 1);
-
-    size_t chunk = file_size / NUM_THREADS;
     for (int i = 0; i < NUM_THREADS; i++) {
-        units[i].data = data; units[i].start = i * chunk;
-        units[i].end = (i == NUM_THREADS - 1) ? file_size : (i + 1) * chunk;
-        units[i].table = &tables[i]; units[i].thread_id = i;
-        if (i < NUM_THREADS - 1) {
-            while (units[i].end < file_size && is_ascii_letter(data[units[i].end])) units[i].end++;
-        }
-        units[i].drop_leading = (units[i].start > 0 && is_ascii_letter(data[units[i].start - 1]));
+        units[i].data = data;
+        units[i].start = cuts[i];
+        units[i].end   = cuts[i + 1];
+        units[i].table = &tables[i];
+        units[i].thread_id = i;
+        units[i].drop_leading = 0; // non-overlap means no need to drop
+
         pthread_create(&threads[i], NULL, worker, &units[i]);
     }
 
+    // Process
     TIMING_START(processing);
     pthread_barrier_wait(&barrier);
     for (int i = 0; i < NUM_THREADS; i++) pthread_join(threads[i], NULL);

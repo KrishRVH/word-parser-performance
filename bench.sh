@@ -85,6 +85,7 @@ else
     echo "✓ Using existing book.txt"
 fi
 
+# Show info for the primary test file
 FILE_SIZE=$(du -h book.txt | cut -f1)
 WORD_COUNT=$(wc -w < book.txt)
 LINE_COUNT=$(wc -l < book.txt)
@@ -95,26 +96,30 @@ echo "  Words: $(printf "%'d" $WORD_COUNT)"
 echo "  Lines: $(printf "%'d" $LINE_COUNT)"
 echo ""
 
-create_test_file() {
-    local size=$1
-    local filename=$2
-    local multiplier=$3
-    if [ ! -f "$filename" ]; then
-        echo "Creating $size test file..."
-        > "$filename"
-        for _ in $(seq 1 "$multiplier"); do
-            cat book.txt >> "$filename"
-        done
-        echo "✓ Created $filename"
+# Create book2.txt (5x) and book3.txt (25x) if user opts in
+create_multiplied_file() {
+    local base=$1
+    local out=$2
+    local mult=$3
+    if [ -f "$out" ]; then
+        return
     fi
+    echo "Creating $out as ${mult}x of $base..."
+    : > "$out"
+    for _ in $(seq 1 "$mult"); do
+        cat "$base" >> "$out"
+    done
+    echo "✓ Created $out"
 }
 
 echo "Do you want to test with larger files? (y/n)"
 read -r response
 if [[ "$response" =~ ^[Yy]$ ]]; then
-    create_test_file "10MB" "book_10mb.txt" 10
-    create_test_file "50MB" "book_50mb.txt" 50
-    TEST_FILES=("book.txt" "book_10mb.txt" "book_50mb.txt")
+    create_multiplied_file "book.txt" "book2.txt" 5
+    create_multiplied_file "book.txt" "book3.txt" 25
+    TEST_FILES=("book.txt")
+    [ -f "book2.txt" ] && TEST_FILES+=("book2.txt")
+    [ -f "book3.txt" ] && TEST_FILES+=("book3.txt")
 else
     TEST_FILES=("book.txt")
 fi
@@ -323,7 +328,8 @@ validate_results() {
         else
             local diff_total=$((${total_counts[$i]} - expected_total))
             local diff_unique=$((${unique_counts[$i]} - expected_unique))
-            if [ "${total_counts[$i]}" = "$expected_total" ] && [ "${unique_counts[$i]}" = "$expected_unique" ]; then
+            if [ "${total_counts[$i]}" = "$expected_total" ] && \
+               [ "${unique_counts[$i]}" = "$expected_unique" ]; then
                 printf "      %-20s: ✓ Exact match\n" "${languages[$i]}"
             else
                 all_match=0
@@ -401,50 +407,65 @@ run_benchmark() {
     # Warm up once
     $cmd "$file" > /dev/null 2>&1
 
-    local total_time=0
+    # Prefer single-line progress if a TTY
+    local IS_TTY=0
+    if [ -t 1 ]; then IS_TTY=1; fi
+
+    # Accumulate in integer nanoseconds (robust and fast)
+    local total_ns=0
+    local best_ns=""
+
     for ((run=1; run<=NUM_RUNS; run++)); do
-        local exec_time
-        exec_time=$($cmd "$file" 2>&1 | grep -E "(Execution time:|Elapsed time:)" | grep -oE "[0-9]+\.?[0-9]*" | head -1)
-        local result=""
-        if [ -n "$exec_time" ]; then
-            # Guess unit: assume milliseconds unless very large
-            if (( $(echo "$exec_time < 1000 && $exec_time > 1" | bc -l) )); then
-                result=$(echo "scale=6; $exec_time / 1000" | bc)
-            else
-                result="$exec_time"
-            fi
-        elif command -v /usr/bin/time &> /dev/null; then
-            result=$(/usr/bin/time -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
-        elif command -v gtime &> /dev/null; then
-            result=$(gtime -f "%.3e" $cmd "$file" 2>&1 1>/dev/null | tail -n1)
-        else
-            local start end
-            start=$(date +%s%N)
-            $cmd "$file" > /dev/null 2>&1
-            end=$(date +%s%N)
-            result=$(echo "scale=6; ($end - $start) / 1000000000" | bc)
+        # Monotonic timing in ns (Linux)
+        local start_ns end_ns
+        start_ns=$(date +%s%N)
+        $cmd "$file" > /dev/null 2>&1
+        end_ns=$(date +%s%N)
+
+        # Duration in ns
+        local dur_ns=$((end_ns - start_ns))
+        # Guard against any weirdness
+        if [ "$dur_ns" -lt 1000000 ]; then
+            dur_ns=1000000  # clamp to 1ms to avoid zeros/div-by-zero downstream
         fi
-        if (( $(echo "$result < 0.001" | bc -l) )); then result="0.001"; fi
-        total_time=$(echo "scale=6; $total_time + $result" | bc)
-        printf "    Run %d: %.3fs\n" "$run" "$result"
+
+        total_ns=$((total_ns + dur_ns))
+        if [ -z "$best_ns" ] || [ "$dur_ns" -lt "$best_ns" ]; then
+            best_ns=$dur_ns
+        fi
+
+        # Convert to seconds for display with awk (no sci-notation issues)
+        local last_s best_s avg_s
+        last_s=$(awk -v ns="$dur_ns" 'BEGIN{printf("%.3f", ns/1e9)}')
+        best_s=$(awk -v ns="$best_ns" 'BEGIN{printf("%.3f", ns/1e9)}')
+        avg_s=$(awk -v ns="$total_ns" -v n="$run" 'BEGIN{printf("%.3f", (ns/n)/1e9)}')
+
+        if [ "$IS_TTY" -eq 1 ]; then
+            printf "\r    Run %d/%d: last=%ss best=%ss avg=%ss\033[K" \
+                "$run" "$NUM_RUNS" "$last_s" "$best_s" "$avg_s"
+        else
+            printf "    Run %d: %ss\n" "$run" "$last_s"
+        fi
     done
 
-    local avg_time=$(echo "scale=6; $total_time / $NUM_RUNS" | bc)
-    if (( $(echo "$avg_time < 0.1" | bc -l) )); then
-        avg_time=$(printf "%.4f" "$avg_time")
-    else
-        avg_time=$(printf "%.3f" "$avg_time")
+    if [ "$IS_TTY" -eq 1 ]; then
+        printf "\n"
     fi
-    echo "    Average: ${avg_time}s"
+
+    # Final average in seconds string
+    local avg_final_s
+    avg_final_s=$(awk -v ns="$total_ns" -v n="$NUM_RUNS" 'BEGIN{v=(ns/n)/1e9; printf((v<0.1)?"%.4f":"%.3f", v)}')
+    echo "    Average: ${avg_final_s}s"
     echo ""
 
+    # Record for rankings/summary (only for the first test file to keep baseline semantics)
     if [[ "$file" == "${TEST_FILES[0]}" ]]; then
         LANG_NAMES[RESULT_COUNT]="$lang"
-        LANG_TIMES[RESULT_COUNT]="$avg_time"
+        LANG_TIMES[RESULT_COUNT]="$avg_final_s"
         RESULT_COUNT=$((RESULT_COUNT + 1))
     fi
 
-    ALL_RESULTS["${lang}:${file}"]="$avg_time"
+    ALL_RESULTS["${lang}:${file}"]="$avg_final_s"
 }
 
 for TEST_FILE in "${TEST_FILES[@]}"; do
@@ -472,12 +493,17 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
         fi
     fi
     if [ "$HAS_NODE" = "1" ]; then
-        run_benchmark "JavaScript (Node.js)" "node --max-old-space-size=4096 --optimize-for-size wordcount.js" "$TEST_FILE"
+        run_benchmark "JavaScript (Node.js)" \
+            "node --max-old-space-size=4096 --optimize-for-size wordcount.js" \
+            "$TEST_FILE"
     fi
     if [ "$HAS_PHP" = "1" ]; then
-        FILE_SIZE_BYTES=$(stat -c%s "$TEST_FILE" 2>/dev/null || stat -f%z "$TEST_FILE" 2>/dev/null)
+        FILE_SIZE_BYTES=$(stat -c%s "$TEST_FILE" 2>/dev/null || \
+                          stat -f%z "$TEST_FILE" 2>/dev/null)
         if [ "$FILE_SIZE_BYTES" -gt 10485760 ]; then
-            run_benchmark "PHP" "php -d opcache.enable_cli=1 -d opcache.jit=tracing -d opcache.jit_buffer_size=128M wordcount.php" "$TEST_FILE"
+            run_benchmark "PHP" \
+              "php -d opcache.enable_cli=1 -d opcache.jit=tracing -d opcache.jit_buffer_size=128M wordcount.php" \
+              "$TEST_FILE"
         else
             run_benchmark "PHP" "php wordcount.php" "$TEST_FILE"
         fi
@@ -520,7 +546,8 @@ if [ $RESULT_COUNT -gt 0 ]; then
         else
             if (( $(echo "$BASELINE_TIME > 0" | bc -l) )); then
                 SLOWDOWN=$(echo "scale=1; $TIME / $BASELINE_TIME" | bc)
-                printf "%d. %-24s %8.3fs (%.1fx slower)\n" "$RANK" "$LANG" "$TIME" "$SLOWDOWN"
+                printf "%d. %-24s %8.3fs (%.1fx slower)\n" \
+                    "$RANK" "$LANG" "$TIME" "$SLOWDOWN"
             else
                 printf "%d. %-24s %8.3fs\n" "$RANK" "$LANG" "$TIME"
             fi
@@ -559,8 +586,12 @@ if [ $RESULT_COUNT -gt 0 ]; then
     if [ $RESULT_COUNT -gt 1 ]; then
         FASTEST="${LANG_TIMES[0]}"; SLOWEST="${LANG_TIMES[0]}"
         for ((i=1; i<RESULT_COUNT; i++)); do
-            if (( $(echo "${LANG_TIMES[$i]} < $FASTEST" | bc -l) )); then FASTEST="${LANG_TIMES[$i]}"; fi
-            if (( $(echo "${LANG_TIMES[$i]} > $SLOWEST" | bc -l) )); then SLOWEST="${LANG_TIMES[$i]}"; fi
+            if (( $(echo "${LANG_TIMES[$i]} < $FASTEST" | bc -l) )); then
+                FASTEST="${LANG_TIMES[$i]}"
+            fi
+            if (( $(echo "${LANG_TIMES[$i]} > $SLOWEST" | bc -l) )); then
+                SLOWEST="${LANG_TIMES[$i]}"
+            fi
         done
         if (( $(echo "$FASTEST > 0" | bc -l) )); then
             SPREAD=$(echo "scale=1; $SLOWEST / $FASTEST" | bc)
@@ -603,7 +634,6 @@ if [[ "$response" =~ ^[Yy]$ ]]; then
     rm -f wordcount_hopt_t6 wordcount_hopt_t12
     rm -rf bin obj
     rm -f WordCount.csproj
-    rm -f book_10mb.txt book_50mb.txt book_60mb.txt
     rm -f *_results.txt
     echo "✓ Cleaned up all files"
 fi

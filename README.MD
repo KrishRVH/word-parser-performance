@@ -26,7 +26,7 @@ taskset -c 0-23 ./bench.sh --validate --runs=3
 ### Rankings (5.3MB test file, ~900K words)
 | Rank | Language | Time | vs Baseline | Word Count | Match |
 |------|----------|------|-------------|------------|-------|
-| 1 | **C Hyperopt** (6-thread)² | 0.007s | baseline | 928,012 | Reference |
+| 1 | **C Hyperopt** (6-thread)² | 0.008s | baseline | 928,012 | Reference |
 | 2 | **Rust** | 0.020s | 2.9x slower | 928,012 | Exact |
 | 3 | **C** | 0.022s | 3.1x slower | 928,012 | Exact |
 | 4 | **Go** | 0.030s | 4.3x slower | 928,012 | Exact |
@@ -40,7 +40,7 @@ taskset -c 0-23 ./bench.sh --validate --runs=3
 ### Performance Scaling Across File Sizes (200 runs average)
 | Language | 5.3MB | 53MB | 261MB | Scaling |
 |----------|-------|------|-------|---------|
-| **C Hyperopt** | 0.007s | 0.029s | 0.029s | Linear |
+| **C Hyperopt** | 0.008s | 0.030s | 0.030s | Linear |
 | **Rust** | 0.020s | 0.221s | 1.176s | Linear |
 | **C** | 0.022s | 0.225s | 1.169s | Linear |
 | **Go** | 0.030s | 0.296s | 1.605s | Linear |
@@ -50,15 +50,15 @@ taskset -c 0-23 ./bench.sh --validate --runs=3
 
 ### Key Findings
 
-- **C Hyperopt achieves 4.58 GB/s** throughput on large files (6-thread version)
-- **Hardware-specific optimization matters**: 6 threads optimal for 5.3MB, achieving 712 MB/s
+- **C Hyperopt achieves 4.67 GB/s** throughput on large files (12-thread version, exceeds 3.0 GB/s target)
+- **Hardware-specific optimization matters**: 6 threads optimal for small files (685 MB/s), 12 threads for large (4.67 GB/s)
 - **Rust leads standard implementations** at 20ms for 5.3MB
 - **Standard C competitive** with Rust, slightly faster at 261MB scale
 - **Go maintains consistent overhead** (1.5x slower than Rust/C)
 - **PHP scales well** despite regex overhead
 - **C# and JavaScript tied** at 90ms for 5.3MB
 - **All implementations scale linearly** with file size
-- **12.9x performance spread** between fastest (C Hyperopt) and slowest
+- **11.3x performance spread** between fastest (C Hyperopt) and slowest
 
 ### Performance Consistency Analysis
 
@@ -83,8 +83,8 @@ taskset -c 0-23 ./bench.sh --validate --runs=3
 
 ### Platform Performance Notes
 
-- **C#/.NET 8**: Performs identically on Windows and Linux (~90ms)
-- **No platform advantage**: Modern .NET has achieved platform parity
+- **C Reference**: 192-241 MB/s throughput, consistent across file sizes
+- **C Hyperopt**: Exceeds 3.0 GB/s target with 4.67 GB/s on large files
 - **WSL2 overhead**: Minimal (~5%), essentially native Linux performance
 
 ## Implementation Approaches
@@ -174,12 +174,12 @@ php wordcount.php book.txt
 
 ## Key Points
 
-- **Hardware-specific optimization achieves up to 32x speedup** (C Hyperopt 4.58 GB/s vs standard C ~140 MB/s on large files)
+- **Hardware-specific optimization achieves up to 19.6x speedup** (C Hyperopt 4.67 GB/s vs standard C 241 MB/s on large files)
 - Implementation quality matters more than language choice
 - All implementations use byte-level processing except PHP (regex)
 - Word definition: Byte-level vs regex boundaries affects counts
 - All implementations are production-optimized
-- Thread count tuning critical for multi-core CPUs (6 threads optimal for small files, 12 for medium)
+- Thread count tuning critical for multi-core CPUs (6 threads optimal for small files, 12 threads for large files)
 
 ## Validation
 

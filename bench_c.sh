@@ -107,7 +107,8 @@ fi
 # Select files
 INPUT_FILES=("$INPUT_FILE")
 if [ $LARGE_MODE -eq 1 ]; then
-    INPUT_FILES+=("book2.txt" "book3.txt")
+    [ -f "book2.txt" ] && INPUT_FILES+=("book2.txt")
+    [ -f "book3.txt" ] && INPUT_FILES+=("book3.txt")
 fi
 
 # Ensure primary exists
@@ -353,6 +354,11 @@ run_bench() {
     FS_MB=$(echo "scale=6; $FS_BYTES / 1048576" | bc)
 
     local times=()
+    local PROGRESS_TTY=0
+    if [ -t 1 ]; then PROGRESS_TTY=1; fi
+
+    local sum="0"
+    local min=""
     for ((i=1; i<=NUM_RUNS; i++)); do
         local start_ns end_ns
         start_ns=$(date +%s%N)
@@ -365,15 +371,28 @@ run_bench() {
         fi
 
         times+=("$result")
-        printf "  Run %d: %.3fs\n" "$i" "$result"
+
+        sum=$(echo "scale=6; $sum + $result" | bc)
+        if [ -z "$min" ] || (( $(echo "$result < $min" | bc -l) )); then
+            min="$result"
+        fi
+        local avg_so_far
+        avg_so_far=$(echo "scale=6; $sum / $i" | bc)
+
+        if [ "$PROGRESS_TTY" -eq 1 ]; then
+            printf "\r  Run %d/%d: last=%.3fs best=%.3fs avg=%.3fs\033[K" \
+                "$i" "$NUM_RUNS" "$result" "$min" "$avg_so_far"
+        else
+            printf "  Run %d: %.3fs\n" "$i" "$result"
+        fi
     done
 
-    local sum=0 min=${times[0]:-0}
-    for t in "${times[@]}"; do
-        sum=$(echo "$sum + $t" | bc)
-        if (( $(echo "$t < $min" | bc -l) )); then min=$t; fi
-    done
-    local avg=$(echo "scale=6; $sum / $NUM_RUNS" | bc)
+    if [ "$PROGRESS_TTY" -eq 1 ]; then
+        printf "\n"
+    fi
+
+    local avg
+    avg=$(echo "scale=6; $sum / $NUM_RUNS" | bc)
 
     local sorted=($(printf "%s\n" "${times[@]}" | sort -n))
     local p50=${sorted[$((NUM_RUNS*50/100))]}
@@ -385,7 +404,8 @@ run_bench() {
         if (( $(echo "$t <= 0" | bc -l) )); then t="0.000001"; fi
         gsum=$(echo "$gsum + l($t)" | bc -l)
     done
-    local gmean=$(echo "e($gsum / $NUM_RUNS)" | bc -l 2>/dev/null | awk '{printf("%.6f",$0)}')
+    local gmean
+    gmean=$(echo "e($gsum / $NUM_RUNS)" | bc -l 2>/dev/null | awk '{printf("%.6f",$0)}')
 
     local throughput="N/A"
     if (( $(echo "$min > 0" | bc -l) )); then
@@ -394,7 +414,8 @@ run_bench() {
 
     printf "  Average: %.3fs\n" "$avg"
     printf "  Best:    %.3fs\n" "$min"
-    printf "  p50:     %.3fs  p95: %.3fs  p99: %.3fs  gmean: %.6fs\n" "$p50" "$p95" "$p99" "$gmean"
+    printf "  p50:     %.3fs  p95: %.3fs  p99: %.3fs  gmean: %.6fs\n" \
+        "$p50" "$p95" "$p99" "$gmean"
     if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
         printf "  Throughput: %.2f MB/s\n" "$throughput"
     else
@@ -446,10 +467,14 @@ echo ""
 
 rm -f /tmp/bench_c_results_$$.txt
 
-if [ $HYPER_ONLY -eq 0 ]; then
-    run_bench "C Reference" "./wordcount_c_ref" "$INPUT_FILE" "0"
+# Run C reference on all files if available and not in hyper-only mode
+if [ $HYPER_ONLY -eq 0 ] && [ -x ./wordcount_c_ref ]; then
+    for f in "${INPUT_FILES[@]}"; do
+        run_bench "C Reference" "./wordcount_c_ref" "$f" "0"
+    done
 fi
 
+# Run all hyperopt builds for all files
 for i in "${!BUILD_VARIANTS[@]}"; do
     is_debug="0"
     [[ "${BUILD_NAMES[$i]}" == *"Debug"* ]] && is_debug="1"
@@ -463,7 +488,12 @@ if [ $DEBUG_MODE -eq 1 ]; then
     echo "Debug Mode Analysis Summary"
     echo "========================================="
     echo ""
-    [ -f "wordcount_debug.log" ] && { echo "Debug Log Output (wordcount_debug.log):"; echo "────────────────────────────────────────"; cat wordcount_debug.log; echo ""; }
+    [ -f "wordcount_debug.log" ] && {
+        echo "Debug Log Output (wordcount_debug.log):"
+        echo "────────────────────────────────────────"
+        cat wordcount_debug.log
+        echo ""
+    }
 fi
 
 echo ""
@@ -475,33 +505,59 @@ echo ""
 echo "Implementation               Average    Best     Throughput   vs Reference"
 echo "──────────────────────────────────────────────────────────────────────────"
 
-if [ $HYPER_ONLY -eq 0 ]; then
-  ref_avg=$(grep "^C Reference|" /tmp/bench_c_results_$$.txt | cut -d'|' -f2 | head -1)
-else
-  ref_avg=""
-fi
-
+# Build per-file reference averages
+declare -A REF_AVG_BY_FILE
+PRIMARY_FILE_BASENAME="$(basename "$INPUT_FILE")"
 while IFS='|' read -r name avg min throughput; do
-    if [ "$name" = "C Reference" ]; then
+    if [[ "$name" == C\ Reference* ]]; then
+        # Extract [file] if present; else primary file
+        shortf=$(echo "$name" | sed -n 's/.*\[\(.*\)\].*/\1/p')
+        if [ -z "$shortf" ]; then
+            shortf="$PRIMARY_FILE_BASENAME"
+        fi
+        REF_AVG_BY_FILE["$shortf"]="$avg"
+    fi
+done < /tmp/bench_c_results_$$.txt
+
+# Print rows using file-matched reference if available
+while IFS='|' read -r name avg min throughput; do
+    # Determine which file this row corresponds to (if any)
+    shortf=$(echo "$name" | sed -n 's/.*\[\(.*\)\].*/\1/p')
+    if [ -z "$shortf" ]; then
+        shortf="$PRIMARY_FILE_BASENAME"
+    fi
+
+    if [[ "$name" == "C Reference" || "$name" == C\ Reference\ \[* ]]; then
         if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
-            printf "%-28s %8.3fs %8.3fs %8.2f MB/s   baseline\n" "$name" "$avg" "$min" "$throughput"
+            # Mark the exact "C Reference" for primary file as baseline
+            if [ "$name" = "C Reference" ]; then
+                printf "%-28s %8.3fs %8.3fs %8.2f MB/s   baseline\n" \
+                    "$name" "$avg" "$min" "$throughput"
+            else
+                printf "%-28s %8.3fs %8.3fs %8.2f MB/s\n" \
+                    "$name" "$avg" "$min" "$throughput"
+            fi
         else
             printf "%-28s %8.3fs %8.3fs %8s\n" "$name" "$avg" "$min" "$throughput"
         fi
     else
-        if [ -n "$ref_avg" ]; then
-          speedup=$(echo "scale=2; $ref_avg / $avg" | bc)
-          if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
-              printf "%-28s %8.3fs %8.3fs %8.2f MB/s   %.2fx\n" "$name" "$avg" "$min" "$throughput" "$speedup"
-          else
-              printf "%-28s %8.3fs %8.3fs %8s   %.2fx\n" "$name" "$avg" "$min" "$throughput" "$speedup"
-          fi
+        ref_for_file="${REF_AVG_BY_FILE["$shortf"]}"
+        if [ -n "$ref_for_file" ]; then
+            speedup=$(echo "scale=2; $ref_for_file / $avg" | bc)
+            if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
+                printf "%-28s %8.3fs %8.3fs %8.2f MB/s   %.2fx\n" \
+                    "$name" "$avg" "$min" "$throughput" "$speedup"
+            else
+                printf "%-28s %8.3fs %8.3fs %8s   %.2fx\n" \
+                    "$name" "$avg" "$min" "$throughput" "$speedup"
+            fi
         else
-          if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
-              printf "%-28s %8.3fs %8.3fs %8.2f MB/s\n" "$name" "$avg" "$min" "$throughput"
-          else
-              printf "%-28s %8.3fs %8.3fs %8s\n" "$name" "$avg" "$min" "$throughput"
-          fi
+            if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
+                printf "%-28s %8.3fs %8.3fs %8.2f MB/s\n" \
+                    "$name" "$avg" "$min" "$throughput"
+            else
+                printf "%-28s %8.3fs %8.3fs %8s\n" "$name" "$avg" "$min" "$throughput"
+            fi
         fi
     fi
 done < /tmp/bench_c_results_$$.txt
@@ -515,7 +571,8 @@ echo ""
 best_throughput=0
 best_impl=""
 while IFS='|' read -r name avg min throughput; do
-    if [[ "$throughput" =~ ^[0-9.]+$ ]] && (( $(echo "$throughput > $best_throughput" | bc -l) )); then
+    if [[ "$throughput" =~ ^[0-9.]+$ ]] && \
+       (( $(echo "$throughput > $best_throughput" | bc -l) )); then
         best_throughput=$throughput
         best_impl=$name
     fi
