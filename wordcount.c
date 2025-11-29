@@ -1,51 +1,48 @@
-// wordcount.c - Word frequency counter
-// Build: gcc -O3 -march=native -std=c11 wordcount.c -o wordcount_c
-// Usage: ./wordcount_c [filename]
+/*
+ * wordcount.c - Word frequency counter
+ * Build: gcc -O2 -std=c11 wordcount.c -o wordcount
+ * Usage: ./wordcount <filename>
+ */
+
+#define _POSIX_C_SOURCE 200809L
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
-#include <time.h>
+#include <unistd.h>
 
 enum {
-    HASH_BITS       = 14,
-    HASH_SIZE       = 1u << HASH_BITS,
-    HASH_MASK       = HASH_SIZE - 1u,
-    MAX_WORD_LEN    = 100,
-    READ_BUF_SIZE   = 8192,
-    TOP_WORDS       = 100,
+    HASH_BITS    = 14,              /* 16K buckets */
+    HASH_SIZE    = 1u << HASH_BITS,
+    MAX_WORD_LEN = 64,
 };
 
 typedef struct WordNode WordNode;
 struct WordNode {
-    char *word;
-    size_t count;
+    char     *word;
+    size_t    count;
     WordNode *next;
 };
 
 typedef struct {
-    const char *word;
-    size_t count;
+    const char *word;   /* points into WordTable storage, not owned */
+    size_t      count;
 } WordCount;
 
 typedef struct {
     WordNode **buckets;
-    size_t total;
-    size_t unique;
+    size_t     nbuckets;
+    size_t     total;
+    size_t     unique;
 } WordTable;
 
-static char *xstrdup(const char *s)
-{
-    size_t len = strlen(s) + 1;
-    char *p = malloc(len);
-    if (p)
-        memcpy(p, s, len);
-    return p;
-}
+/* --- Hash table --------------------------------------------------------- */
 
 static inline uint32_t fnv1a(const char *s)
 {
@@ -55,7 +52,7 @@ static inline uint32_t fnv1a(const char *s)
     return h;
 }
 
-static WordTable *table_create(void)
+static WordTable *word_table_create(void)
 {
     WordTable *t = malloc(sizeof *t);
     if (!t)
@@ -67,32 +64,30 @@ static WordTable *table_create(void)
         return NULL;
     }
 
-    t->total = 0;
-    t->unique = 0;
+    t->nbuckets = HASH_SIZE;
+    t->total = t->unique = 0;
     return t;
 }
 
-static void table_destroy(WordTable *t)
+static void word_table_destroy(WordTable *t)
 {
     if (!t)
         return;
 
-    for (size_t i = 0; i < HASH_SIZE; i++) {
-        WordNode *n = t->buckets[i];
-        while (n) {
-            WordNode *next = n->next;
+    for (size_t i = 0; i < t->nbuckets; i++) {
+        for (WordNode *n = t->buckets[i], *next; n; n = next) {
+            next = n->next;
             free(n->word);
             free(n);
-            n = next;
         }
     }
     free(t->buckets);
     free(t);
 }
 
-static int table_insert(WordTable *t, const char *word)
+static int word_table_add(WordTable *t, const char *word)
 {
-    size_t idx = fnv1a(word) & HASH_MASK;
+    size_t idx = fnv1a(word) & (t->nbuckets - 1u);
 
     for (WordNode *n = t->buckets[idx]; n; n = n->next) {
         if (strcmp(n->word, word) == 0) {
@@ -106,7 +101,7 @@ static int table_insert(WordTable *t, const char *word)
     if (!n)
         return -1;
 
-    n->word = xstrdup(word);
+    n->word = strdup(word);
     if (!n->word) {
         free(n);
         return -1;
@@ -120,41 +115,24 @@ static int table_insert(WordTable *t, const char *word)
     return 0;
 }
 
-static size_t extract_word(char *dst, const char *src, size_t pos)
-{
-    while (src[pos] && !isalpha((unsigned char)src[pos]))
-        pos++;
-
-    size_t i = 0;
-    while (src[pos] && isalpha((unsigned char)src[pos]) && i < MAX_WORD_LEN - 1)
-        dst[i++] = (char)tolower((unsigned char)src[pos++]);
-
-    /* If truncated, skip remainder of the word */
-    while (src[pos] && isalpha((unsigned char)src[pos]))
-        pos++;
-
-    dst[i] = '\0';
-    return pos;
-}
-
 static int cmp_by_count_desc(const void *a, const void *b)
 {
-    const WordCount *wa = (const WordCount *)a;
-    const WordCount *wb = (const WordCount *)b;
+    const WordCount *wa = a, *wb = b;
 
-    if (wa->count < wb->count) return 1;
-    if (wa->count > wb->count) return -1;
+    if (wa->count != wb->count)
+        return (wa->count < wb->count) ? 1 : -1;
+
     return strcmp(wa->word, wb->word);
 }
 
-static WordCount *table_to_sorted_array(const WordTable *t, size_t *out_len)
+static WordCount *word_table_snapshot(const WordTable *t, size_t *out_len)
 {
     WordCount *arr = malloc(t->unique * sizeof *arr);
     if (!arr)
         return NULL;
 
     size_t j = 0;
-    for (size_t i = 0; i < HASH_SIZE; i++) {
+    for (size_t i = 0; i < t->nbuckets; i++) {
         for (WordNode *n = t->buckets[i]; n; n = n->next) {
             arr[j].word = n->word;
             arr[j].count = n->count;
@@ -167,178 +145,129 @@ static WordCount *table_to_sorted_array(const WordTable *t, size_t *out_len)
     return arr;
 }
 
-static int process_file(WordTable *t, FILE *fp)
+/* --- Tokenizer ---------------------------------------------------------- */
+
+/*
+ * Scan forward from p to find the next alphabetic word.
+ * - Writes at most (dst_size - 1) lowercased chars into dst.
+ * - Always NUL-terminates dst.
+ * - Overlong words are truncated; remainder is skipped.
+ * - Returns pointer past the word, or NULL if no more words before end.
+ */
+static const char *next_word(const char *p, const char *end,
+                             char *dst, size_t dst_size)
 {
-    char buf[READ_BUF_SIZE];
+    const unsigned char *s = (const unsigned char *)p;
+    const unsigned char *e = (const unsigned char *)end;
+
+    while (s < e && !isalpha(*s))
+        s++;
+
+    if (s >= e) {
+        dst[0] = '\0';
+        return NULL;
+    }
+
+    size_t i = 0;
+    while (s < e && isalpha(*s) && i + 1 < dst_size)
+        dst[i++] = (char)tolower(*s++);
+
+    while (s < e && isalpha(*s))
+        s++;
+
+    dst[i] = '\0';
+    return (const char *)s;
+}
+
+static int process_data(WordTable *t, const char *data, size_t len)
+{
+    const char *p = data;
+    const char *end = data + len;
     char word[MAX_WORD_LEN];
 
-    while (fgets(buf, sizeof buf, fp)) {
-        size_t pos = 0;
-
-        while (buf[pos]) {
-            pos = extract_word(word, buf, pos);
-            if (word[0] && table_insert(t, word) < 0)
-                return -1;
-        }
+    while ((p = next_word(p, end, word, sizeof word))) {
+        if (word[0] && word_table_add(t, word) < 0)
+            return -1;
     }
-    return ferror(fp) ? -1 : 0;
-}
-
-static double get_file_size_mb(const char *path)
-{
-    struct stat st;
-    return (stat(path, &st) == 0) ? st.st_size / (1024.0 * 1024.0) : 0.0;
-}
-
-static void fmt_thousands(char *buf, size_t buflen, size_t n)
-{
-    char tmp[32];
-    int len = snprintf(tmp, sizeof tmp, "%zu", n);
-
-    if (len <= 0 || (size_t)len >= sizeof tmp) {
-        snprintf(buf, buflen, "%zu", n);
-        return;
-    }
-
-    int commas = (len - 1) / 3;
-    int outlen = len + commas;
-
-    if ((size_t)outlen >= buflen) {
-        snprintf(buf, buflen, "%zu", n);
-        return;
-    }
-
-    buf[outlen] = '\0';
-    int src = len - 1;
-    int dst = outlen - 1;
-    int digits = 0;
-
-    while (src >= 0) {
-        if (digits == 3) {
-            buf[dst--] = ',';
-            digits = 0;
-        }
-        buf[dst--] = tmp[src--];
-        digits++;
-    }
-}
-
-static void print_top_words(FILE *out, const WordCount *words, size_t nwords,
-                            size_t limit, size_t total)
-{
-    if (limit > nwords)
-        limit = nwords;
-
-    for (size_t i = 0; i < limit; i++) {
-        char count_str[32];
-        fmt_thousands(count_str, sizeof count_str, words[i].count);
-        double pct = (words[i].count * 100.0) / (double)total;
-        fprintf(out, "%4zu  %-15s %9s %9.2f%%\n",
-                i + 1, words[i].word, count_str, pct);
-    }
-}
-
-static void print_results(const WordTable *t, const WordCount *words,
-                          size_t nwords, double elapsed_ms, double size_mb)
-{
-    char total_str[32], unique_str[32];
-    fmt_thousands(total_str, sizeof total_str, t->total);
-    fmt_thousands(unique_str, sizeof unique_str, t->unique);
-
-    puts("\n=== Top 10 Most Frequent Words ===");
-    puts("Rank  Word                Count Percentage");
-    puts("----  --------------- --------- ----------");
-    print_top_words(stdout, words, nwords, 10, t->total);
-
-    puts("\n=== Statistics ===");
-    printf("File size:       %.2f MB\n", size_mb);
-    printf("Total words:     %s\n", total_str);
-    printf("Unique words:    %s\n", unique_str);
-    printf("Execution time:  %.2f ms\n", elapsed_ms);
-    printf("Hash table size: %zu buckets\n", (size_t)HASH_SIZE);
-
-    printf("Compiler:        ");
-#if defined(__clang__)
-    printf("Clang %s\n", __clang_version__);
-#elif defined(__GNUC__)
-    printf("GCC %d.%d.%d\n", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
-#else
-    puts("Unknown");
-#endif
-}
-
-static int write_results(const char *infile, const WordTable *t,
-                         const WordCount *words, size_t nwords, double elapsed_ms)
-{
-    static const char suffix[] = "_c_results.txt";
-    const size_t suffix_len = sizeof suffix - 1;  /* exclude '\0' */
-    char outpath[256];
-
-    const char *dot = strrchr(infile, '.');
-    size_t baselen = dot ? (size_t)(dot - infile) : strlen(infile);
-
-    if (baselen + suffix_len + 1 > sizeof outpath)
-        baselen = sizeof outpath - suffix_len - 1;
-
-    snprintf(outpath, sizeof outpath, "%.*s%s", (int)baselen, infile, suffix);
-
-    FILE *fp = fopen(outpath, "w");
-    if (!fp) {
-        fprintf(stderr, "Warning: cannot write '%s': %s\n", outpath, strerror(errno));
-        return -1;
-    }
-
-    time_t now = time(NULL);
-    fprintf(fp, "Word Frequency Analysis - C Implementation\n");
-    fprintf(fp, "Input file: %s\n", infile);
-    fprintf(fp, "Generated: %s", ctime(&now));
-    fprintf(fp, "Execution time: %.2f ms\n\n", elapsed_ms);
-    fprintf(fp, "Total words: %zu\n", t->total);
-    fprintf(fp, "Unique words: %zu\n\n", t->unique);
-    fprintf(fp, "Top %d Most Frequent Words:\n", TOP_WORDS);
-    fprintf(fp, "Rank  Word                Count Percentage\n");
-    fprintf(fp, "----  --------------- --------- ----------\n");
-    print_top_words(fp, words, nwords, TOP_WORDS, t->total);
-
-    fclose(fp);
-    printf("\nResults written to: %s\n", outpath);
     return 0;
 }
 
+/* --- Output ------------------------------------------------------------- */
+
+static void print_results(const WordTable *t, const WordCount *words,
+                          size_t nwords, size_t file_size)
+{
+    puts("\n  Rank  Word                 Count      %");
+    puts("  ----  ---------------  ---------  -----");
+
+    size_t limit = nwords < 15 ? nwords : 15;
+    for (size_t i = 0; i < limit; i++) {
+        printf("  %4zu  %-15s  %9zu  %5.2f\n",
+               i + 1, words[i].word, words[i].count,
+               words[i].count * 100.0 / t->total);
+    }
+
+    printf("\n  %zu words, %zu unique (%zu bytes)\n",
+           t->total, t->unique, file_size);
+}
+
+/* --- Main --------------------------------------------------------------- */
+
 int main(int argc, char *argv[])
 {
-    const char *filename = (argc > 1) ? argv[1] : "book.txt";
-    int status = EXIT_FAILURE;
-    FILE *fp = NULL;
-    WordTable *table = NULL;
-    WordCount *words = NULL;
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
 
-    fp = fopen(filename, "r");
-    if (!fp) {
-        fprintf(stderr, "Error: cannot open '%s': %s\n", filename, strerror(errno));
-        fprintf(stderr, "Usage: %s [filename]\n\n", argv[0]);
-        fprintf(stderr, "To create a test file:\n");
-        fprintf(stderr, "  curl https://www.gutenberg.org/files/2701/2701-0.txt -o book.txt\n");
+    const char *filename  = argv[1];
+    int         fd        = -1;
+    void       *map       = MAP_FAILED;
+    size_t      file_size = 0;
+    WordTable  *table     = NULL;
+    WordCount  *words     = NULL;
+    struct stat st;
+    int         status = EXIT_FAILURE;
+
+    fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "Cannot open '%s': %s\n", filename, strerror(errno));
         goto out;
     }
 
-    printf("Processing file: %s\n", filename);
+    if (fstat(fd, &st) < 0) {
+        fprintf(stderr, "Cannot stat '%s': %s\n", filename, strerror(errno));
+        goto out;
+    }
 
-    table = table_create();
+    if (st.st_size == 0) {
+        fprintf(stderr, "File '%s' is empty\n", filename);
+        goto out;
+    }
+
+    if ((off_t)(size_t)st.st_size != st.st_size) {
+        fprintf(stderr, "File '%s' too large for this build\n", filename);
+        goto out;
+    }
+
+    file_size = (size_t)st.st_size;
+
+    map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) {
+        fprintf(stderr, "Cannot mmap '%s': %s\n", filename, strerror(errno));
+        goto out;
+    }
+
+    const char *data = (const char *)map;
+
+    table = word_table_create();
     if (!table) {
-        fputs("Error: memory allocation failed\n", stderr);
+        fputs("Memory allocation failed\n", stderr);
         goto out;
     }
 
-    clock_t t0 = clock();
-    int err = process_file(table, fp);
-    clock_t t1 = clock();
-
-    fclose(fp);
-    fp = NULL;
-
-    if (err) {
-        fputs("Error: failed to process file\n", stderr);
+    if (process_data(table, data, file_size) < 0) {
+        fputs("Processing failed\n", stderr);
         goto out;
     }
 
@@ -349,23 +278,21 @@ int main(int argc, char *argv[])
     }
 
     size_t nwords;
-    words = table_to_sorted_array(table, &nwords);
+    words = word_table_snapshot(table, &nwords);
     if (!words) {
-        fputs("Error: memory allocation failed\n", stderr);
+        fputs("Memory allocation failed\n", stderr);
         goto out;
     }
 
-    double elapsed_ms = ((double)(t1 - t0) / CLOCKS_PER_SEC) * 1000.0;
-    double size_mb = get_file_size_mb(filename);
-
-    print_results(table, words, nwords, elapsed_ms, size_mb);
-    write_results(filename, table, words, nwords, elapsed_ms);
+    print_results(table, words, nwords, file_size);
     status = EXIT_SUCCESS;
 
 out:
     free(words);
-    table_destroy(table);
-    if (fp)
-        fclose(fp);
+    word_table_destroy(table);
+    if (map != MAP_FAILED)
+        munmap(map, file_size);
+    if (fd >= 0)
+        close(fd);
     return status;
 }
