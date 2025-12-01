@@ -18,43 +18,43 @@
 #include <unistd.h>
 
 enum {
-    HASH_BITS    = 14,              /* 16K buckets */
-    HASH_SIZE    = 1u << HASH_BITS,
+    HASH_BITS = 14, /* 16K buckets */
+    HASH_SIZE = 1u << HASH_BITS,
     MAX_WORD_LEN = 64,
 };
 
 typedef struct WordNode WordNode;
 struct WordNode {
-    char     *word;
-    size_t    count;
-    WordNode *next;
+    char* word;
+    size_t count;
+    WordNode* next;
 };
 
 typedef struct {
-    const char *word;   /* points into WordTable storage, not owned */
-    size_t      count;
+    const char* word; /* points into WordTable storage, not owned */
+    size_t count;
 } WordCount;
 
 typedef struct {
-    WordNode **buckets;
-    size_t     nbuckets;
-    size_t     total;
-    size_t     unique;
+    WordNode** buckets;
+    size_t nbuckets;
+    size_t total;
+    size_t unique;
 } WordTable;
 
 /* --- Hash table --------------------------------------------------------- */
 
-static inline uint32_t fnv1a(const char *s)
+static inline uint32_t fnv1a(const char* s)
 {
     uint32_t h = 2166136261u;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+    for (const unsigned char* p = (const unsigned char*)s; *p; p++)
         h = (h ^ *p) * 16777619u;
     return h;
 }
 
-static WordTable *word_table_create(void)
+static WordTable* word_table_create(void)
 {
-    WordTable *t = malloc(sizeof *t);
+    WordTable* t = malloc(sizeof *t);
     if (!t)
         return NULL;
 
@@ -69,7 +69,7 @@ static WordTable *word_table_create(void)
     return t;
 }
 
-static void word_table_destroy(WordTable *t)
+static void word_table_destroy(WordTable* t)
 {
     if (!t)
         return;
@@ -85,11 +85,11 @@ static void word_table_destroy(WordTable *t)
     free(t);
 }
 
-static int word_table_add(WordTable *t, const char *word)
+static int word_table_add(WordTable* t, const char* word)
 {
     size_t idx = fnv1a(word) & (t->nbuckets - 1u);
 
-    for (WordNode *n = t->buckets[idx]; n; n = n->next) {
+    for (WordNode* n = t->buckets[idx]; n; n = n->next) {
         if (strcmp(n->word, word) == 0) {
             n->count++;
             t->total++;
@@ -97,7 +97,7 @@ static int word_table_add(WordTable *t, const char *word)
         }
     }
 
-    WordNode *n = malloc(sizeof *n);
+    WordNode* n = malloc(sizeof *n);
     if (!n)
         return -1;
 
@@ -115,7 +115,7 @@ static int word_table_add(WordTable *t, const char *word)
     return 0;
 }
 
-static int cmp_by_count_desc(const void *a, const void *b)
+static int cmp_by_count_desc(const void* a, const void* b)
 {
     const WordCount *wa = a, *wb = b;
 
@@ -125,15 +125,15 @@ static int cmp_by_count_desc(const void *a, const void *b)
     return strcmp(wa->word, wb->word);
 }
 
-static WordCount *word_table_snapshot(const WordTable *t, size_t *out_len)
+static WordCount* word_table_snapshot(const WordTable* t, size_t* out_len)
 {
-    WordCount *arr = malloc(t->unique * sizeof *arr);
+    WordCount* arr = malloc(t->unique * sizeof *arr);
     if (!arr)
         return NULL;
 
     size_t j = 0;
     for (size_t i = 0; i < t->nbuckets; i++) {
-        for (WordNode *n = t->buckets[i]; n; n = n->next) {
+        for (WordNode* n = t->buckets[i]; n; n = n->next) {
             arr[j].word = n->word;
             arr[j].count = n->count;
             j++;
@@ -145,22 +145,35 @@ static WordCount *word_table_snapshot(const WordTable *t, size_t *out_len)
     return arr;
 }
 
+/* ASCII-only word definition: [A-Za-z], independent of locale. */
+static inline int is_ascii_letter(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+static inline char to_lower_ascii(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : (char)c;
+}
+
 /* --- Tokenizer ---------------------------------------------------------- */
 
 /*
- * Scan forward from p to find the next alphabetic word.
+ * Scan forward from p to find the next word, defined as a run of
+ * ASCII letters [A-Za-z].
  * - Writes at most (dst_size - 1) lowercased chars into dst.
  * - Always NUL-terminates dst.
  * - Overlong words are truncated; remainder is skipped.
  * - Returns pointer past the word, or NULL if no more words before end.
  */
-static const char *next_word(const char *p, const char *end,
-                             char *dst, size_t dst_size)
+static const char*
+next_word(const char* p, const char* end, char* dst, size_t dst_size)
 {
-    const unsigned char *s = (const unsigned char *)p;
-    const unsigned char *e = (const unsigned char *)end;
+    const unsigned char* s = (const unsigned char*)p;
+    const unsigned char* e = (const unsigned char*)end;
 
-    while (s < e && !isalpha(*s))
+    /* Skip non-ASCII letters. */
+    while (s < e && !is_ascii_letter(*s))
         s++;
 
     if (s >= e) {
@@ -168,21 +181,23 @@ static const char *next_word(const char *p, const char *end,
         return NULL;
     }
 
+    /* Copy and lowercase up to dst_size - 1 chars. */
     size_t i = 0;
-    while (s < e && isalpha(*s) && i + 1 < dst_size)
-        dst[i++] = (char)tolower(*s++);
+    while (s < e && is_ascii_letter(*s) && i + 1 < dst_size)
+        dst[i++] = to_lower_ascii(*s++);
 
-    while (s < e && isalpha(*s))
+    /* Skip any remaining letters from an overlong word. */
+    while (s < e && is_ascii_letter(*s))
         s++;
 
     dst[i] = '\0';
-    return (const char *)s;
+    return (const char*)s;
 }
 
-static int process_data(WordTable *t, const char *data, size_t len)
+static int process_data(WordTable* t, const char* data, size_t len)
 {
-    const char *p = data;
-    const char *end = data + len;
+    const char* p = data;
+    const char* end = data + len;
     char word[MAX_WORD_LEN];
 
     while ((p = next_word(p, end, word, sizeof word))) {
@@ -194,8 +209,10 @@ static int process_data(WordTable *t, const char *data, size_t len)
 
 /* --- Output ------------------------------------------------------------- */
 
-static void print_results(const WordTable *t, const WordCount *words,
-                          size_t nwords, size_t file_size)
+static void print_results(const WordTable* t,
+                          const WordCount* words,
+                          size_t nwords,
+                          size_t file_size)
 {
     puts("\n  Rank  Word                 Count      %");
     puts("  ----  ---------------  ---------  -----");
@@ -203,31 +220,35 @@ static void print_results(const WordTable *t, const WordCount *words,
     size_t limit = nwords < 15 ? nwords : 15;
     for (size_t i = 0; i < limit; i++) {
         printf("  %4zu  %-15s  %9zu  %5.2f\n",
-               i + 1, words[i].word, words[i].count,
+               i + 1,
+               words[i].word,
+               words[i].count,
                words[i].count * 100.0 / t->total);
     }
 
     printf("\n  %zu words, %zu unique (%zu bytes)\n",
-           t->total, t->unique, file_size);
+           t->total,
+           t->unique,
+           file_size);
 }
 
 /* --- Main --------------------------------------------------------------- */
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    const char *filename  = argv[1];
-    int         fd        = -1;
-    void       *map       = MAP_FAILED;
-    size_t      file_size = 0;
-    WordTable  *table     = NULL;
-    WordCount  *words     = NULL;
+    const char* filename = argv[1];
+    int fd = -1;
+    void* map = MAP_FAILED;
+    size_t file_size = 0;
+    WordTable* table = NULL;
+    WordCount* words = NULL;
     struct stat st;
-    int         status = EXIT_FAILURE;
+    int status = EXIT_FAILURE;
 
     fd = open(filename, O_RDONLY);
     if (fd < 0) {
@@ -258,7 +279,7 @@ int main(int argc, char *argv[])
         goto out;
     }
 
-    const char *data = (const char *)map;
+    const char* data = (const char*)map;
 
     table = word_table_create();
     if (!table) {

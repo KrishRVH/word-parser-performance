@@ -23,22 +23,22 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 
-#define TEST(name) \
-    do { \
-        ++tests_run; \
-        printf("  %-50s ", #name); \
-        fflush(stdout); \
+#define TEST(name)                                                             \
+    do {                                                                       \
+        ++tests_run;                                                           \
+        printf("  %-50s ", #name);                                             \
+        fflush(stdout);                                                        \
     } while (0)
 
-#define PASS() \
-    do { \
-        ++tests_passed; \
-        printf("[PASS]\n"); \
+#define PASS()                                                                 \
+    do {                                                                       \
+        ++tests_passed;                                                        \
+        printf("[PASS]\n");                                                    \
     } while (0)
 
-#define FAIL(msg) \
-    do { \
-        printf("[FAIL] %s\n", msg); \
+#define FAIL(msg)                                                              \
+    do {                                                                       \
+        printf("[FAIL] %s\n", msg);                                            \
     } while (0)
 
 /*===========================================================================
@@ -49,7 +49,7 @@ static void test_create_destroy(void)
 {
     TEST(create_destroy_null_config);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
         assert(wc_total_words(t) == 0);
         assert(wc_unique_words(t) == 0);
@@ -60,7 +60,7 @@ static void test_create_destroy(void)
     TEST(create_with_config);
     {
         wc_config cfg = { .initial_capacity = 128, .max_word_length = 32 };
-        wc_table *t = wc_create(&cfg);
+        wc_table* t = wc_create(&cfg);
         assert(t != NULL);
         wc_destroy(t);
         PASS();
@@ -68,7 +68,7 @@ static void test_create_destroy(void)
 
     TEST(destroy_null_safe);
     {
-        wc_destroy(NULL);  /* Should not crash. */
+        wc_destroy(NULL); /* Should not crash. */
         PASS();
     }
 }
@@ -77,7 +77,7 @@ static void test_add_word(void)
 {
     TEST(add_single_word);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
         wc_status st = wc_add_word(t, "hello");
@@ -91,7 +91,7 @@ static void test_add_word(void)
 
     TEST(add_duplicate_word);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
         assert(wc_add_word(t, "hello") == WC_OK);
@@ -107,7 +107,7 @@ static void test_add_word(void)
 
     TEST(add_multiple_words);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
         assert(wc_add_word(t, "apple") == WC_OK);
@@ -131,7 +131,7 @@ static void test_add_word(void)
 
     TEST(add_word_null_word);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         wc_status st = wc_add_word(t, NULL);
         assert(st == WC_ERR_INVALID_ARGUMENT);
         wc_destroy(t);
@@ -143,10 +143,10 @@ static void test_process_text(void)
 {
     TEST(process_simple_text);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
-        const char *text = "Hello, World!";
+        const char* text = "Hello, World!";
         wc_status st = wc_process_text(t, text, strlen(text));
 
         assert(st == WC_OK);
@@ -159,14 +159,14 @@ static void test_process_text(void)
 
     TEST(process_case_insensitive);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
-        const char *text = "Hello HELLO hello HeLLo";
+        const char* text = "Hello HELLO hello HeLLo";
         assert(wc_process_text(t, text, strlen(text)) == WC_OK);
 
         assert(wc_total_words(t) == 4);
-        assert(wc_unique_words(t) == 1);  /* All "hello" variants. */
+        assert(wc_unique_words(t) == 1); /* All "hello" variants. */
 
         wc_destroy(t);
         PASS();
@@ -174,7 +174,7 @@ static void test_process_text(void)
 
     TEST(process_empty_text);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
         wc_status st = wc_process_text(t, "", 0);
@@ -190,10 +190,10 @@ static void test_process_text(void)
 
     TEST(process_punctuation_only);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
-        const char *text = "!@#$%^&*()123456789";
+        const char* text = "!@#$%^&*()123456789";
         assert(wc_process_text(t, text, strlen(text)) == WC_OK);
 
         assert(wc_total_words(t) == 0);
@@ -205,7 +205,7 @@ static void test_process_text(void)
 
     TEST(process_null_data_nonzero_len);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         wc_status st = wc_process_text(t, NULL, 100);
         assert(st == WC_ERR_INVALID_ARGUMENT);
         wc_destroy(t);
@@ -217,13 +217,13 @@ static void test_snapshot(void)
 {
     TEST(snapshot_sorted_by_count);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
-        const char *text = "apple banana apple cherry apple banana";
+        const char* text = "apple banana apple cherry apple banana";
         assert(wc_process_text(t, text, strlen(text)) == WC_OK);
 
-        wc_entry *entries = NULL;
+        wc_entry* entries = NULL;
         size_t count = 0;
         wc_status st = wc_snapshot(t, &entries, &count);
 
@@ -248,13 +248,13 @@ static void test_snapshot(void)
 
     TEST(snapshot_ties_sorted_alphabetically);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
-        const char *text = "zebra apple mango";
+        const char* text = "zebra apple mango";
         assert(wc_process_text(t, text, strlen(text)) == WC_OK);
 
-        wc_entry *entries = NULL;
+        wc_entry* entries = NULL;
         size_t count = 0;
         assert(wc_snapshot(t, &entries, &count) == WC_OK);
 
@@ -270,10 +270,10 @@ static void test_snapshot(void)
 
     TEST(snapshot_empty_table);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
-        wc_entry *entries = (wc_entry *)0xDEADBEEF;  /* Sentinel. */
+        wc_entry* entries = (wc_entry*)0xDEADBEEF; /* Sentinel. */
         size_t count = 999;
         wc_status st = wc_snapshot(t, &entries, &count);
 
@@ -287,7 +287,7 @@ static void test_snapshot(void)
 
     TEST(free_snapshot_null_safe);
     {
-        wc_free_snapshot(NULL);  /* Should not crash. */
+        wc_free_snapshot(NULL); /* Should not crash. */
         PASS();
     }
 }
@@ -311,7 +311,7 @@ static void test_version(void)
 {
     TEST(version_string);
     {
-        const char *version = wc_version();
+        const char* version = wc_version();
         assert(version != NULL);
         assert(strlen(version) > 0);
         /* Should look like "X.Y.Z" */
@@ -324,7 +324,7 @@ static void test_stress(void)
 {
     TEST(many_unique_words);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
         char word[16];
@@ -345,7 +345,7 @@ static void test_stress(void)
 
     TEST(many_duplicates);
     {
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
         const int n = 100000;
@@ -356,7 +356,7 @@ static void test_stress(void)
         assert(wc_total_words(t) == (size_t)n);
         assert(wc_unique_words(t) == 1);
 
-        wc_entry *entries = NULL;
+        wc_entry* entries = NULL;
         size_t count = 0;
         assert(wc_snapshot(t, &entries, &count) == WC_OK);
 
@@ -371,15 +371,15 @@ static void test_stress(void)
     TEST(word_truncation);
     {
         /* Test that words longer than max_word_length are truncated. */
-        wc_config cfg = { .max_word_length = 8 };  /* 7 chars + NUL */
-        wc_table *t = wc_create(&cfg);
+        wc_config cfg = { .max_word_length = 8 }; /* 7 chars + NUL */
+        wc_table* t = wc_create(&cfg);
         assert(t != NULL);
 
-        const char *text = "abcdefghijk";  /* 11 letters */
+        const char* text = "abcdefghijk"; /* 11 letters */
         assert(wc_process_text(t, text, strlen(text)) == WC_OK);
 
         /* Should be truncated to "abcdefg" (7 chars). */
-        wc_entry *entries = NULL;
+        wc_entry* entries = NULL;
         size_t count = 0;
         assert(wc_snapshot(t, &entries, &count) == WC_OK);
         assert(count == 1);
@@ -394,17 +394,17 @@ static void test_stress(void)
     TEST(snapshot_idempotence);
     {
         /* Verify that calling snapshot twice yields same results. */
-        wc_table *t = wc_create(NULL);
+        wc_table* t = wc_create(NULL);
         assert(t != NULL);
 
-        const char *text = "apple banana cherry apple";
+        const char* text = "apple banana cherry apple";
         assert(wc_process_text(t, text, strlen(text)) == WC_OK);
 
-        wc_entry *entries1 = NULL;
+        wc_entry* entries1 = NULL;
         size_t count1 = 0;
         assert(wc_snapshot(t, &entries1, &count1) == WC_OK);
 
-        wc_entry *entries2 = NULL;
+        wc_entry* entries2 = NULL;
         size_t count2 = 0;
         assert(wc_snapshot(t, &entries2, &count2) == WC_OK);
 
@@ -423,8 +423,9 @@ static void test_stress(void)
     TEST(large_initial_capacity);
     {
         /* Test that large initial_capacity works without crash. */
-        wc_config cfg = { .initial_capacity = 1000000 };  /* 1M buckets requested */
-        wc_table *t = wc_create(&cfg);
+        wc_config cfg = { .initial_capacity =
+                                  1000000 }; /* 1M buckets requested */
+        wc_table* t = wc_create(&cfg);
         assert(t != NULL);
 
         assert(wc_add_word(t, "test") == WC_OK);
@@ -437,12 +438,12 @@ static void test_stress(void)
     TEST(small_initial_capacity_clamped);
     {
         /* Test that small initial_capacity is clamped to default. */
-        wc_config cfg = { .initial_capacity = 4 };  /* Tiny, should be clamped */
-        wc_table *t = wc_create(&cfg);
+        wc_config cfg = { .initial_capacity = 4 }; /* Tiny, should be clamped */
+        wc_table* t = wc_create(&cfg);
         assert(t != NULL);
 
         /* Should still work normally (clamped to default 16384). */
-        const char *text = "hello world";
+        const char* text = "hello world";
         assert(wc_process_text(t, text, strlen(text)) == WC_OK);
         assert(wc_unique_words(t) == 2);
 
@@ -481,7 +482,8 @@ int main(void)
     test_stress();
 
     printf("\n=== Results: %d/%d tests passed ===\n\n",
-           tests_passed, tests_run);
+           tests_passed,
+           tests_run);
 
     return (tests_passed == tests_run) ? 0 : 1;
 }

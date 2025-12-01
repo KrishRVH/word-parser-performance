@@ -15,18 +15,18 @@
 
 #include "wordcount.h"
 
-#include <assert.h>  /* assert */
-#include <ctype.h>   /* isalpha, tolower */
-#include <stdint.h>  /* uint32_t, uint64_t, UINT64_C */
-#include <stdlib.h>  /* malloc, calloc, free, qsort */
-#include <string.h>  /* memcpy, strcmp, strlen */
+#include <assert.h> /* assert */
+#include <ctype.h>  /* isalpha, tolower */
+#include <stdint.h> /* uint32_t, uint64_t, UINT64_C */
+#include <stdlib.h> /* malloc, calloc, free, qsort */
+#include <string.h> /* memcpy, strcmp, strlen */
 
 /*===========================================================================
  * Version (must match header)
  *===========================================================================*/
 
 #if WC_VERSION_MAJOR != 2 || WC_VERSION_MINOR != 1 || WC_VERSION_PATCH != 0
-    #error "Version mismatch between wordcount.h and wordcount.c"
+#error "Version mismatch between wordcount.h and wordcount.c"
 #endif
 
 /*===========================================================================
@@ -83,20 +83,20 @@ static const uint64_t FNV64_PRIME = UINT64_C(1099511628211);
  * @brief A single node in the hash table chain.
  */
 typedef struct wc_node {
-    struct wc_node *next;  /**< Next node in chain, or NULL. */
-    size_t          count; /**< Occurrence count for this word. */
-    char           *word;  /**< Heap-allocated, NUL-terminated word. */
+    struct wc_node* next; /**< Next node in chain, or NULL. */
+    size_t count;         /**< Occurrence count for this word. */
+    char* word;           /**< Heap-allocated, NUL-terminated word. */
 } wc_node;
 
 /**
  * @brief The word-count hash table.
  */
 struct wc_table {
-    wc_node **buckets;      /**< Array of bucket chain heads. */
-    size_t    bucket_count; /**< Number of buckets (always power of 2). */
-    size_t    total_words;  /**< Total tokens processed. */
-    size_t    unique_words; /**< Number of distinct entries. */
-    size_t    max_word_len; /**< Max word length including NUL. */
+    wc_node** buckets;   /**< Array of bucket chain heads. */
+    size_t bucket_count; /**< Number of buckets (always power of 2). */
+    size_t total_words;  /**< Total tokens processed. */
+    size_t unique_words; /**< Number of distinct entries. */
+    size_t max_word_len; /**< Max word length including NUL. */
 };
 
 /*===========================================================================
@@ -136,9 +136,9 @@ static inline size_t clamp_size(size_t value, size_t min_val, size_t max_val)
  * @note This function handles the empty case (len == 0) correctly,
  *       returning the offset basis.
  */
-static uint64_t fnv1a_hash(const void *data, size_t len)
+static uint64_t fnv1a_hash(const void* data, size_t len)
 {
-    const unsigned char *bytes = (const unsigned char *)data;
+    const unsigned char* bytes = (const unsigned char*)data;
     uint64_t hash = FNV64_OFFSET_BASIS;
 
     for (size_t i = 0; i < len; ++i) {
@@ -155,7 +155,7 @@ static uint64_t fnv1a_hash(const void *data, size_t len)
  * @param str  NUL-terminated string.
  * @return     64-bit hash value.
  */
-static uint64_t fnv1a_str(const char *str)
+static uint64_t fnv1a_str(const char* str)
 {
     return fnv1a_hash(str, strlen(str));
 }
@@ -172,14 +172,14 @@ static uint64_t fnv1a_str(const char *str)
  *
  * @note Caller is responsible for freeing the returned memory.
  */
-static char *dup_string_n(const char *str, size_t len)
+static char* dup_string_n(const char* str, size_t len)
 {
     /*
      * MEM04-C: Beware of zero-length allocations.
      * malloc(0) behavior is implementation-defined; we always allocate
      * at least 1 byte for the NUL terminator.
      */
-    char *copy = malloc(len + 1);
+    char* copy = malloc(len + 1);
     if (copy == NULL) {
         return NULL;
     }
@@ -217,7 +217,7 @@ static inline size_t bucket_index(uint64_t hash, size_t bucket_count)
  *
  * @note On failure, the original table is unchanged.
  */
-static wc_status grow_table(wc_table *t)
+static wc_status grow_table(wc_table* t)
 {
     /* Don't grow beyond the maximum. */
     const size_t max_buckets = (size_t)1u << WC_MAX_HASH_BITS;
@@ -231,16 +231,16 @@ static wc_status grow_table(wc_table *t)
      * calloc initializes to NULL pointers, which is what we need
      * for empty bucket chains.
      */
-    wc_node **new_buckets = calloc(new_count, sizeof(*new_buckets));
+    wc_node** new_buckets = calloc(new_count, sizeof(*new_buckets));
     if (new_buckets == NULL) {
         return WC_ERR_OUT_OF_MEMORY;
     }
 
     /* Rehash all existing entries. */
     for (size_t i = 0; i < t->bucket_count; ++i) {
-        wc_node *node = t->buckets[i];
+        wc_node* node = t->buckets[i];
         while (node != NULL) {
-            wc_node *next = node->next;
+            wc_node* next = node->next;
 
             const uint64_t hash = fnv1a_str(node->word);
             const size_t idx = bucket_index(hash, new_count);
@@ -270,7 +270,7 @@ static wc_status grow_table(wc_table *t)
  * @param len  Length of word (excluding NUL terminator).
  * @return     WC_OK on success, WC_ERR_OUT_OF_MEMORY on failure.
  */
-static wc_status add_word_internal(wc_table *t, const char *word, size_t len)
+static wc_status add_word_internal(wc_table* t, const char* word, size_t len)
 {
     /* Empty words are silently ignored. */
     if (len == 0) {
@@ -292,7 +292,7 @@ static wc_status add_word_internal(wc_table *t, const char *word, size_t len)
     const size_t idx = bucket_index(hash, t->bucket_count);
 
     /* Search for existing entry. */
-    for (wc_node *node = t->buckets[idx]; node != NULL; node = node->next) {
+    for (wc_node* node = t->buckets[idx]; node != NULL; node = node->next) {
         if (strcmp(node->word, word) == 0) {
             node->count++;
             t->total_words++;
@@ -301,12 +301,12 @@ static wc_status add_word_internal(wc_table *t, const char *word, size_t len)
     }
 
     /* Create new entry. */
-    char *word_copy = dup_string_n(word, len);
+    char* word_copy = dup_string_n(word, len);
     if (word_copy == NULL) {
         return WC_ERR_OUT_OF_MEMORY;
     }
 
-    wc_node *new_node = malloc(sizeof(*new_node));
+    wc_node* new_node = malloc(sizeof(*new_node));
     if (new_node == NULL) {
         free(word_copy);
         return WC_ERR_OUT_OF_MEMORY;
@@ -344,13 +344,11 @@ static wc_status add_word_internal(wc_table *t, const char *word, size_t len)
  *           - out_size > 0
  *           These preconditions are asserted in debug builds.
  */
-static bool next_word(
-    const char **pos,
-    const char  *end,
-    char        *out,
-    size_t       out_size,
-    size_t      *out_len
-)
+static bool next_word(const char** pos,
+                      const char* end,
+                      char* out,
+                      size_t out_size,
+                      size_t* out_len)
 {
     /* Precondition assertions (active in debug builds). */
     assert(pos != NULL);
@@ -358,8 +356,8 @@ static bool next_word(
     assert(out_size > 0);
     assert(out_len != NULL);
 
-    const unsigned char *p = (const unsigned char *)*pos;
-    const unsigned char *e = (const unsigned char *)end;
+    const unsigned char* p = (const unsigned char*)*pos;
+    const unsigned char* e = (const unsigned char*)end;
 
     /* Skip non-alphabetic characters. */
     while (p < e && !isalpha(*p)) {
@@ -369,7 +367,7 @@ static bool next_word(
     if (p >= e) {
         out[0] = '\0';
         *out_len = 0;
-        *pos = (const char *)p;
+        *pos = (const char*)p;
         return false;
     }
 
@@ -391,7 +389,7 @@ static bool next_word(
 
     out[len] = '\0';
     *out_len = len;
-    *pos = (const char *)p;
+    *pos = (const char*)p;
 
     return true;
 }
@@ -403,10 +401,10 @@ static bool next_word(
  * @param b  Pointer to second wc_entry.
  * @return   Negative if a < b, positive if a > b, zero if equal.
  */
-static int compare_entries(const void *a, const void *b)
+static int compare_entries(const void* a, const void* b)
 {
-    const wc_entry *ea = (const wc_entry *)a;
-    const wc_entry *eb = (const wc_entry *)b;
+    const wc_entry* ea = (const wc_entry*)a;
+    const wc_entry* eb = (const wc_entry*)b;
 
     /* Descending by count. */
     if (ea->count > eb->count) {
@@ -424,7 +422,7 @@ static int compare_entries(const void *a, const void *b)
  * Public API implementation
  *===========================================================================*/
 
-wc_table *wc_create(const wc_config *cfg)
+wc_table* wc_create(const wc_config* cfg)
 {
     unsigned hash_bits = WC_DEFAULT_HASH_BITS;
     size_t max_word = WC_DEFAULT_MAX_WORD;
@@ -438,7 +436,8 @@ wc_table *wc_create(const wc_config *cfg)
             const size_t default_cap = (size_t)1u << WC_DEFAULT_HASH_BITS;
             size_t cap = cfg->initial_capacity;
 
-            /* Clamp to at least the default to avoid accidentally tiny tables. */
+            /* Clamp to at least the default to avoid accidentally tiny tables.
+             */
             if (cap < default_cap) {
                 cap = default_cap;
             }
@@ -457,10 +456,7 @@ wc_table *wc_create(const wc_config *cfg)
         /* Process max_word_length. */
         if (cfg->max_word_length > 0) {
             max_word = clamp_size(
-                cfg->max_word_length,
-                WC_MIN_MAX_WORD,
-                WC_MAX_MAX_WORD
-            );
+                    cfg->max_word_length, WC_MIN_MAX_WORD, WC_MAX_MAX_WORD);
         }
     }
 
@@ -470,7 +466,7 @@ wc_table *wc_create(const wc_config *cfg)
      * Allocate table structure first, then buckets.
      * Use goto-cleanup pattern (MEM12-C) for error handling.
      */
-    wc_table *t = malloc(sizeof(*t));
+    wc_table* t = malloc(sizeof(*t));
     if (t == NULL) {
         return NULL;
     }
@@ -489,7 +485,7 @@ wc_table *wc_create(const wc_config *cfg)
     return t;
 }
 
-void wc_destroy(wc_table *t)
+void wc_destroy(wc_table* t)
 {
     if (t == NULL) {
         return;
@@ -497,9 +493,9 @@ void wc_destroy(wc_table *t)
 
     /* Free all nodes in all bucket chains. */
     for (size_t i = 0; i < t->bucket_count; ++i) {
-        wc_node *node = t->buckets[i];
+        wc_node* node = t->buckets[i];
         while (node != NULL) {
-            wc_node *next = node->next;
+            wc_node* next = node->next;
             free(node->word);
             free(node);
             node = next;
@@ -510,7 +506,7 @@ void wc_destroy(wc_table *t)
     free(t);
 }
 
-wc_status wc_add_word(wc_table *t, const char *word)
+wc_status wc_add_word(wc_table* t, const char* word)
 {
     if (t == NULL || word == NULL) {
         return WC_ERR_INVALID_ARGUMENT;
@@ -519,7 +515,7 @@ wc_status wc_add_word(wc_table *t, const char *word)
     return add_word_internal(t, word, strlen(word));
 }
 
-wc_status wc_process_text(wc_table *t, const char *data, size_t len)
+wc_status wc_process_text(wc_table* t, const char* data, size_t len)
 {
     if (t == NULL) {
         return WC_ERR_INVALID_ARGUMENT;
@@ -536,13 +532,13 @@ wc_status wc_process_text(wc_table *t, const char *data, size_t len)
      * 1. Explicit error handling (VLAs can silently overflow the stack).
      * 2. Configurable max_word_len that could be large.
      */
-    char *buffer = malloc(t->max_word_len);
+    char* buffer = malloc(t->max_word_len);
     if (buffer == NULL) {
         return WC_ERR_OUT_OF_MEMORY;
     }
 
-    const char *pos = data;
-    const char *end = data + len;
+    const char* pos = data;
+    const char* end = data + len;
     size_t word_len;
     wc_status status = WC_OK;
 
@@ -559,17 +555,18 @@ wc_status wc_process_text(wc_table *t, const char *data, size_t len)
     return status;
 }
 
-size_t wc_total_words(const wc_table *t)
+size_t wc_total_words(const wc_table* t)
 {
     return (t != NULL) ? t->total_words : 0;
 }
 
-size_t wc_unique_words(const wc_table *t)
+size_t wc_unique_words(const wc_table* t)
 {
     return (t != NULL) ? t->unique_words : 0;
 }
 
-wc_status wc_snapshot(const wc_table *t, wc_entry **out_entries, size_t *out_len)
+wc_status
+wc_snapshot(const wc_table* t, wc_entry** out_entries, size_t* out_len)
 {
     if (t == NULL || out_entries == NULL || out_len == NULL) {
         return WC_ERR_INVALID_ARGUMENT;
@@ -586,7 +583,7 @@ wc_status wc_snapshot(const wc_table *t, wc_entry **out_entries, size_t *out_len
      * MEM04-C: Don't allocate zero bytes.
      * We've already handled unique_words == 0 above.
      */
-    wc_entry *entries = malloc(t->unique_words * sizeof(*entries));
+    wc_entry* entries = malloc(t->unique_words * sizeof(*entries));
     if (entries == NULL) {
         return WC_ERR_OUT_OF_MEMORY;
     }
@@ -594,7 +591,7 @@ wc_status wc_snapshot(const wc_table *t, wc_entry **out_entries, size_t *out_len
     /* Collect all entries. */
     size_t idx = 0;
     for (size_t i = 0; i < t->bucket_count; ++i) {
-        for (wc_node *node = t->buckets[i]; node != NULL; node = node->next) {
+        for (wc_node* node = t->buckets[i]; node != NULL; node = node->next) {
             entries[idx].word = node->word;
             entries[idx].count = node->count;
             ++idx;
@@ -610,7 +607,7 @@ wc_status wc_snapshot(const wc_table *t, wc_entry **out_entries, size_t *out_len
     return WC_OK;
 }
 
-void wc_free_snapshot(wc_entry *entries)
+void wc_free_snapshot(wc_entry* entries)
 {
     /*
      * MEM34-C: Only free memory allocated dynamically.
@@ -619,7 +616,7 @@ void wc_free_snapshot(wc_entry *entries)
     free(entries);
 }
 
-const char *wc_version(void)
+const char* wc_version(void)
 {
     return WC_VERSION_STRING;
 }

@@ -46,11 +46,12 @@ enum {
  * @param context  Context string (e.g., filename), or NULL.
  * @param message  Error message.
  */
-static void report_error(const char *context, const char *message)
+static void report_error(const char* context, const char* message)
 {
     if (context != NULL && context[0] != '\0') {
         (void)fprintf(stderr, "wc: %s: %s\n", context, message);
-    } else {
+    }
+    else {
         (void)fprintf(stderr, "wc: %s\n", message);
     }
 }
@@ -58,7 +59,7 @@ static void report_error(const char *context, const char *message)
 /**
  * @brief Convert wc_status to human-readable string.
  */
-static const char *status_string(wc_status st)
+static const char* status_string(wc_status st)
 {
     switch (st) {
         case WC_OK:
@@ -86,20 +87,19 @@ static const char *status_string(wc_status st)
  *
  * @note On success with empty file, *out_data is NULL and *out_len is 0.
  */
-static bool read_entire_file(FILE *fp, char **out_data, size_t *out_len)
+static bool read_entire_file(FILE* fp, char** out_data, size_t* out_len)
 {
-    char *buffer = NULL;
+    char* buffer = NULL;
     size_t capacity = 0;
     size_t length = 0;
 
     for (;;) {
         /* Grow buffer as needed. */
         if (length + READ_BUFFER_SIZE > capacity) {
-            const size_t new_capacity = (capacity == 0)
-                ? READ_BUFFER_SIZE
-                : capacity * 2;
+            const size_t new_capacity =
+                    (capacity == 0) ? READ_BUFFER_SIZE : capacity * 2;
 
-            char *new_buffer = realloc(buffer, new_capacity);
+            char* new_buffer = realloc(buffer, new_capacity);
             if (new_buffer == NULL) {
                 free(buffer);
                 return false;
@@ -116,7 +116,7 @@ static bool read_entire_file(FILE *fp, char **out_data, size_t *out_len)
                 free(buffer);
                 return false;
             }
-            break;  /* EOF reached. */
+            break; /* EOF reached. */
         }
     }
 
@@ -137,9 +137,9 @@ static bool read_entire_file(FILE *fp, char **out_data, size_t *out_len)
  * @param filename  Filename for error messages.
  * @return          WC_OK on success, error status on failure.
  */
-static wc_status process_file(wc_table *t, FILE *fp, const char *filename)
+static wc_status process_file(wc_table* t, FILE* fp, const char* filename)
 {
-    char *data = NULL;
+    char* data = NULL;
     size_t len = 0;
 
     if (!read_entire_file(fp, &data, &len)) {
@@ -175,7 +175,7 @@ static wc_status process_file(wc_table *t, FILE *fp, const char *filename)
  * @param count    Number of entries.
  * @param limit    Maximum entries to print (0 = all).
  */
-static void print_results(const wc_entry *entries, size_t count, size_t limit)
+static void print_results(const wc_entry* entries, size_t count, size_t limit)
 {
     const size_t to_print = (limit > 0 && limit < count) ? limit : count;
 
@@ -189,26 +189,24 @@ static void print_results(const wc_entry *entries, size_t count, size_t limit)
  *
  * @param t  Word-count table.
  */
-static void print_summary(const wc_table *t)
+static void print_summary(const wc_table* t)
 {
-    (void)fprintf(
-        stderr,
-        "\nTotal words: %zu, Unique words: %zu\n",
-        wc_total_words(t),
-        wc_unique_words(t)
-    );
+    (void)fprintf(stderr,
+                  "\nTotal words: %zu, Unique words: %zu\n",
+                  wc_total_words(t),
+                  wc_unique_words(t));
 }
 
 /*===========================================================================
  * Main entry point
  *===========================================================================*/
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     int exit_code = EXIT_OK;
 
     /* Create word-count table with default configuration. */
-    wc_table *table = wc_create(NULL);
+    wc_table* table = wc_create(NULL);
     if (table == NULL) {
         report_error(NULL, "failed to create word table");
         return EXIT_ERROR;
@@ -220,12 +218,13 @@ int main(int argc, char *argv[])
         if (st != WC_OK) {
             exit_code = EXIT_ERROR;
         }
-    } else {
+    }
+    else {
         /* Process each file argument. */
         for (int i = 1; i < argc; ++i) {
-            const char *filename = argv[i];
+            const char* filename = argv[i];
 
-            FILE *fp = fopen(filename, "rb");
+            FILE* fp = fopen(filename, "rb");
             if (fp == NULL) {
                 report_error(filename, strerror(errno));
                 exit_code = EXIT_ERROR;
@@ -243,14 +242,15 @@ int main(int argc, char *argv[])
 
     /* Output results if any words were processed. */
     if (wc_unique_words(table) > 0) {
-        wc_entry *entries = NULL;
+        wc_entry* entries = NULL;
         size_t count = 0;
 
         const wc_status st = wc_snapshot(table, &entries, &count);
         if (st == WC_OK) {
             print_results(entries, count, TOP_N);
             wc_free_snapshot(entries);
-        } else {
+        }
+        else {
             report_error(NULL, status_string(st));
             exit_code = EXIT_ERROR;
         }
