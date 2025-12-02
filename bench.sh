@@ -240,7 +240,7 @@ validate_results() {
     local expected_unique=0
 
     if [ "$HAS_GCC" = "1" ] && [ -f "wordcount_c" ]; then
-        c_counts=$(extract_counts_from_output "./build/wordcount_c" "$file")
+        c_counts=$(extract_counts_from_output "./wordcount_c" "$file")
         expected_total=$(echo $c_counts | cut -d' ' -f1)
         expected_unique=$(echo $c_counts | cut -d' ' -f2)
         echo "    Using C as reference: $expected_total total, $expected_unique unique"
