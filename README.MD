@@ -21,6 +21,160 @@ bench.sh (debug/validation):
 taskset -c 0-23 ./bench.sh --validate --runs=3
 ```
 
+## Benchmark Word Definition and Validation Spec
+
+This benchmark does **not** use `wc -w`'s idea of a "word".
+All implementations are required to follow the definition below.
+
+### 1. Input and Encoding Assumptions
+
+- Input files are treated as **raw byte streams**.
+- The benchmark makes **no attempt** to interpret character encodings or locales.
+- All logic is defined in terms of **single bytes**, not Unicode scalar values.
+
+Implementations may *internally* treat the input as UTF‑8 for convenience, but the word definition itself is **ASCII‑only and byte-based**.
+
+---
+
+### 2. Word Definition (Benchmark Spec)
+
+A **word** is defined as a **maximal run of ASCII letters**. Formally:
+
+- Let `is_letter(b)` be:
+
+  ```text
+  is_letter(b) := ('A' <= b <= 'Z') OR ('a' <= b <= 'z')
+  ```
+
+  where `b` is a single byte (0–255), **not** a Unicode code point.
+
+- Scan the byte stream from start to end:
+
+  - Any contiguous sequence of bytes where `is_letter(b)` is true forms **one word**.
+  - Any byte where `is_letter(b)` is false (digits, punctuation, whitespace, non‑ASCII, etc.) acts as a **separator** and is **not part of any word**.
+
+Examples:
+
+- `"foo-bar"` → words: `"foo"`, `"bar"` (the `-` is a separator)
+- `"123abc456"` → word: `"abc"` (digits are separators)
+- `"it's"` → words: `"it"`, `"s"` (apostrophe is a separator)
+- Bytes ≥ 0x80 (non‑ASCII) are **always separators**.
+
+---
+
+### 3. Case Handling and Canonical Form
+
+Words are treated **case-insensitively**:
+
+- Each word is lowercased **per byte** for ASCII letters:
+
+  ```text
+  if ('A' <= b <= 'Z') then b := b + 32
+  ```
+
+- `'Apple'`, `'APPLE'`, and `'apple'` are all the same word `"apple"`.
+
+Non‑ASCII bytes (≥ 0x80) are never part of words, so they are never lowercased.
+
+---
+
+### 4. Maximum Word Length and Truncation
+
+Implementations are allowed to impose an internal maximum on stored word length (e.g. 64 or 100 bytes) for performance reasons, with the following constraint:
+
+- **Counting semantics are unaffected by truncation.**
+
+Concretely:
+
+- When scanning a run of letters, the implementation may:
+  - Store at most `MAX_WORD_LEN` bytes of the word for hashing / comparison.
+  - **Skip the remaining letters of that run**, but **must still count exactly one word** for that entire run.
+- The remainder of an overlong word **must not** be treated as a separate word.
+
+So a 200‑byte ASCII letter run is **1 word**, not 2 or more, regardless of any internal truncation.
+
+For the provided implementations:
+
+- C reference, C hyperopt, Rust, Go, JS, C# all satisfy this property for the benchmark corpus.
+
+---
+
+### 5. Counts and Statistics
+
+For each input file, every implementation must compute:
+
+- **Total words**
+  = total number of word tokens encountered in the file, as defined above.
+
+- **Unique words**
+  = number of distinct lowercased word strings.
+
+Sorting / presentation:
+
+- When listing "top N" words, entries are sorted by:
+  1. **Descending count**, then
+  2. **Ascending lexicographic order** of the lowercased ASCII word.
+
+Percentages are computed as:
+
+```text
+percentage(word) = (count(word) * 100.0) / total_words
+```
+
+---
+
+### 6. Validation Rules (Cross-Language Consistency)
+
+The **C reference implementation** (`wordcount_c`) is the canonical implementation for this spec.
+
+Validation proceeds as follows:
+
+1. Run the C reference on a given file, capturing:
+   - `Total words: T_ref`
+   - `Unique words: U_ref`
+
+2. For each other implementation (`C hyperopt`, `Rust`, `Go`, `C#`, `JavaScript`, `PHP`, etc.):
+
+   - Run on the same file and extract:
+     - `Total words: T_impl`
+     - `Unique words: U_impl`
+
+   - An implementation is considered a **correct match** if:
+
+     ```text
+     T_impl == T_ref AND U_impl == U_ref
+     ```
+
+3. Additionally, for each implementation that matches `(T_ref, U_ref)`, we verify the **top 10** words:
+
+   - Extract the top 10 `(word, count)` pairs as written in that implementation's `*_results.txt`.
+   - Normalize (strip commas, etc.) and sort into a canonical representation.
+   - All normalized top‑10 lists must be **bit‑for‑bit identical** across implementations that matched `(T_ref, U_ref)`.
+
+PHP is currently known to differ slightly in counts due to its use of a regex word definition (`\b[a-z]+\b`) and is treated as non-reference in validation.
+
+---
+
+### 7. Relationship to `wc -w`
+
+The GNU `wc -w` tool uses a *different* definition:
+
+- A word is a sequence of **non-whitespace characters** delimited by whitespace, not by non-letters.
+- It does **not** split on punctuation or digits; `'foo-bar'`, `'123abc'`, and `"it's"` each count as a single word.
+- Behavior is locale‑sensitive.
+
+As a result, for the same `book.txt` test file:
+
+- `wc -w` reports: **901,325** words (whitespace-delimited tokens).
+- Benchmark spec (ASCII-letter tokens) reports: **928,012** words.
+
+For this benchmark:
+
+- **`wc -w` is not the ground truth.**
+- The only ground truth is: *"Does this implementation match the C reference implementation under the ASCII-letters-only spec above?"*
+
+---
+
 ## Performance Results
 
 ### Rankings (5.3MB test file, ~900K words)
@@ -99,16 +253,15 @@ taskset -c 0-23 ./bench.sh --validate --runs=3
 | **C#** | Byte-level processing | ASCII letters only | Pre-sized dictionary |
 | **PHP** | Regex extraction | `\b[a-z]+\b` pattern | Native C regex, array_count_values |
 
-## Validation
+## Validation Summary
 
 All implementations except PHP produce identical results:
 
 - **928,012 words**: C Hyperopt, C, Rust, Go, JavaScript, C#
 - **927,930 words**: PHP (-82 due to regex boundary handling)
+- **901,325 words**: `wc -w` (different definition - whitespace-delimited)
 
-Word definitions:
-- Byte-level: ASCII letters [a-zA-Z]
-- Regex: PCRE word boundaries
+See the **[Benchmark Word Definition and Validation Spec](#benchmark-word-definition-and-validation-spec)** section above for the complete specification and explanation of why these numbers differ.
 
 
 ## Technical Details
@@ -181,13 +334,15 @@ php wordcount.php book.txt
 - All implementations are production-optimized
 - Thread count tuning critical for multi-core CPUs (6 threads optimal for small files, 12 threads for large files)
 
-## Validation
+## Validation Mode
 
-The `--validate` flag:
-- Uses C implementation as reference
-- Compares word counts across implementations
-- Verifies top 10 word consistency
-- Reports exact differences
+The `--validate` flag runs cross-language validation:
+- Uses C reference implementation as ground truth
+- Compares total and unique word counts across all implementations
+- Verifies top 10 word consistency (exact match required)
+- Reports any differences in counts or rankings
+
+See the **[Benchmark Word Definition and Validation Spec](#benchmark-word-definition-and-validation-spec)** section for the complete validation specification.
 
 ## Contributing
 
