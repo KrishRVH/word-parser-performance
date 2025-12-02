@@ -87,13 +87,13 @@ fi
 
 # Show info for the primary test file
 FILE_SIZE=$(du -h book.txt | cut -f1)
-WORD_COUNT=$(wc -w < book.txt)
-LINE_COUNT=$(wc -l < book.txt)
+WORD_COUNT_WC=$(wc -w < book.txt)
+WORD_COUNT_ASCII=$(./wordcount_c book.txt | awk '/Total words:/ {gsub(/[^0-9]/,"",$3); print $3}')
 echo ""
 echo "Test file information:"
 echo "  Size: $FILE_SIZE"
-echo "  Words: $(printf "%'d" $WORD_COUNT)"
-echo "  Lines: $(printf "%'d" $LINE_COUNT)"
+echo "  Words (wc -w):        $(printf "%'d" "$WORD_COUNT_WC")"
+echo "  Words (ASCII tokens): $(printf "%'d" "$WORD_COUNT_ASCII")"
 echo ""
 
 # Create book2.txt (5x) and book3.txt (25x) if user opts in
