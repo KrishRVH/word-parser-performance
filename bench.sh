@@ -155,7 +155,7 @@ fi
 if [ "$HAS_GCC" = "1" ]; then
     echo "Compiling C reference..."
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops \
-        wordcount.c -o wordcount_c 2>/dev/null
+        ./build/wordcount.c -o wordcount_c 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "✓ C compilation successful"
     else
@@ -240,7 +240,7 @@ validate_results() {
     local expected_unique=0
 
     if [ "$HAS_GCC" = "1" ] && [ -f "wordcount_c" ]; then
-        c_counts=$(extract_counts_from_output "./wordcount_c" "$file")
+        c_counts=$(extract_counts_from_output "./build/wordcount_c" "$file")
         expected_total=$(echo $c_counts | cut -d' ' -f1)
         expected_unique=$(echo $c_counts | cut -d' ' -f2)
         echo "    Using C as reference: $expected_total total, $expected_unique unique"
@@ -475,7 +475,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     echo ""
 
     if [ "$HAS_GCC" = "1" ]; then
-        [ -f "wordcount_c" ] && run_benchmark "C" "./wordcount_c" "$TEST_FILE"
+        [ -f "wordcount_c" ] && run_benchmark "C" "wordcount_c" "$TEST_FILE"
         [ -f "wordcount_hopt_t6" ] && run_benchmark "C hyperopt (6-thread)" "./wordcount_hopt_t6" "$TEST_FILE"
         [ -f "wordcount_hopt_t12" ] && run_benchmark "C hyperopt (12-thread)" "./wordcount_hopt_t12" "$TEST_FILE"
     fi

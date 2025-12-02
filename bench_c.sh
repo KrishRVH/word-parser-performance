@@ -138,10 +138,10 @@ rm -f wordcount_debug.log wordcount_debug_*.log
 echo "Building reference C implementation..."
 if [ $DEBUG_MODE -eq 1 ] && [ $HYPER_ONLY -eq 0 ]; then
     gcc -O2 -g -fno-omit-frame-pointer -march=native \
-        wordcount.c -o wordcount_c_ref 2>/dev/null
+        ./build/wordcount.c -o wordcount_c_ref 2>/dev/null
 else
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops \
-        wordcount.c -o wordcount_c_ref 2>/dev/null
+        ./build/wordcount.c -o wordcount_c_ref 2>/dev/null
 fi
 if [ $HYPER_ONLY -eq 0 ]; then
   if [ $? -eq 0 ]; then
