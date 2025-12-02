@@ -219,9 +219,9 @@ void debug_dump_stats()
 #endif
 
 #define INITIAL_CAPACITY 65536
-#define STRING_POOL_SIZE (32 * 1024 * 1024)
+#define STRING_POOL_SIZE ((size_t)32 * 1024 * 1024)
 #define MAX_WORD 100
-#define TOP_N 100
+#define TOP_N ((size_t)100)
 
 typedef struct
 {
@@ -485,7 +485,7 @@ static inline void *xaligned_alloc_dbg(size_t align, size_t size)
 #define MEMORY_ALLOC_ALIGNED(align, size) \
     xaligned_alloc_portable((align), (size))
 
-#define MEMORY_FREE(p, size) free(p)
+#define MEMORY_FREE(p, size) (free(p), (void)(size))
 
 #endif  // DEBUG
 
@@ -825,6 +825,7 @@ static void process_chunk_avx512(ThreadTable *t,
 
         if (drop_leading && (letters & 1ull))
         {
+            // cppcheck-suppress knownConditionTrueFalse
             if ((~letters) == 0ull)
                 continue;
             unsigned lead = __builtin_ctzll(~letters);
@@ -868,6 +869,7 @@ static void process_chunk_avx512(ThreadTable *t,
             unsigned start = __builtin_ctzll(m);
             uint64_t tail = m >> start;
             unsigned run_len =
+                    // cppcheck-suppress knownConditionTrueFalse
                     ((~tail) == 0ull) ? (64 - start) : __builtin_ctzll(~tail);
 
             if (start > 0 && word_len > 0)
@@ -1387,8 +1389,8 @@ int main(int argc, char *argv[])
         fprintf(out,
                 "Throughput: %.2f MB/s\n\n",
                 (file_size / (1024.0 * 1024.0)) / (exec_ms / 1000.0));
-        fprintf(out, "Total: %lu\n", total_words);
-        fprintf(out, "Unique: %lu\n\n", total_unique);
+        fprintf(out, "Total: %zu\n", total_words);
+        fprintf(out, "Unique: %zu\n\n", total_unique);
         fprintf(out, "Top 100:\n");
         for (int i = 0; i < TOP_N && i < (int)top_count; i++)
         {

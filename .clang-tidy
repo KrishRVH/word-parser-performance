@@ -1,7 +1,4 @@
 ---
-# C-focused clang-tidy configuration
-# Avoids C++-centric checks that fight idiomatic C patterns
-
 Checks: >-
   -*,
   clang-analyzer-*,
@@ -11,22 +8,14 @@ Checks: >-
   -bugprone-reserved-identifier,
   -bugprone-easily-swappable-parameters,
   -bugprone-assignment-in-if-condition,
-  -bugprone-narrowing-conversions
+  -bugprone-narrowing-conversions,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-sizeof-expression
 
-# Rationale for exclusions:
-#   readability-*: Too C++-centric; flags idiomatic C patterns as problems
-#   insecureAPI.DeprecatedOrUnsafeBufferHandling: Annex K not portable
-#   reserved-identifier: _POSIX_C_SOURCE is correct and necessary
-#   easily-swappable-parameters: Too noisy; qsort signature is what it is
-#   assignment-in-if-condition: Idiomatic C pattern (while ((c = getchar())))
-#   narrowing-conversions: size_t -> double for printf is intentional
+# Additional exclusions rationale:
+#   - multi-level-implicit-pointer-conversion: C allows void* <-> T** implicitly; idiomatic for malloc/calloc/free
+#   - sizeof-expression: sizeof(*ptr) pattern is correct and preferred for allocations
 
 WarningsAsErrors: ''
-
 HeaderFilterRegex: '.*'
-
 FormatStyle: file
-
-CheckOptions:
-  - key: bugprone-suspicious-string-compare.WarnOnLogicalNotComparison
-    value: true

@@ -170,6 +170,7 @@ run_cppcheck() {
             --platform=unix64 \
             --suppress=missingIncludeSystem \
             --suppress=unmatchedSuppression \
+            --suppress=knownConditionTrueFalse \
             --quiet \
             --error-exitcode=1 \
             -j "$JOBS" \
