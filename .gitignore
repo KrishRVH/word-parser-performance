@@ -1,5 +1,4 @@
 # Build Systems
-/build/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
