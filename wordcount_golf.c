@@ -73,6 +73,9 @@ I main(I c,C**v){
               i+1,D[i].w,D[i].c,100.0*D[i].c/GT);
  printf("\nStats: %.2fMB words:%zu uniq:%zu\n",
         (double)L/1048576,GT,k);
+ puts("\n=== Statistics ===");
+ printf("Total words:     %zu\n", GT);
+ printf("Unique words:    %zu\n", k);
  munmap(M,L);munmap(P,J);close(f);free(D);
  R 0;
 }
