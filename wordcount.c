@@ -22,6 +22,16 @@ enum
     HASH_SIZE = 1u << HASH_BITS,
     MAX_WORD = 64,
     TOP_N = 10,
+
+    /*
+     * Arena sizing: empirically, English text averages ~5 chars/word.
+     * With overhead (WordNode + alignment + pointer), budget ~16 bytes
+     * per word. file_size/8 approximates total words, so file_size/8 * 16
+     * = file_size * 2 would be safe. We use file_size/4 as a conservative
+     * middle ground, plus a page for small files.
+     */
+    ARENA_DIVISOR = 4,
+    ARENA_MIN = 4096,
 };
 
 _Static_assert((HASH_SIZE & (HASH_SIZE - 1)) == 0,
@@ -32,6 +42,7 @@ struct WordNode
 {
     WordNode *next;
     size_t count;
+    uint32_t hash;
     char word[];
 };
 
@@ -68,18 +79,19 @@ static void *arena_alloc(Arena *a, size_t size, size_t align)
 
 /* --- Hash table --------------------------------------------------------- */
 
-static inline uint32_t fnv1a(const char *s)
-{
-    uint32_t h = 2166136261u;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
-        h = (h ^ *p) * 16777619u;
-    return h;
-}
+#define FNV_OFFSET 2166136261u
+#define FNV_PRIME 16777619u
 
 static int word_table_init(WordTable *t, size_t arena_cap)
 {
     memset(t, 0, sizeof *t);
-    if (!(t->arena.base = malloc(arena_cap)))
+    t->arena.base = mmap(NULL,
+                         arena_cap,
+                         PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1,
+                         0);
+    if (t->arena.base == MAP_FAILED)
         return -1;
     t->arena.cap = arena_cap;
     return 0;
@@ -87,16 +99,20 @@ static int word_table_init(WordTable *t, size_t arena_cap)
 
 static void word_table_free(WordTable *t)
 {
-    free(t->arena.base);
+    if (t->arena.base && t->arena.base != MAP_FAILED)
+        munmap(t->arena.base, t->arena.cap);
 }
 
-static int word_table_add(WordTable *restrict t, const char *restrict word)
+static int word_table_add(WordTable *restrict t,
+                          const char *restrict word,
+                          size_t len,
+                          uint32_t hash)
 {
-    size_t idx = fnv1a(word) & (HASH_SIZE - 1);
+    size_t idx = hash & (HASH_SIZE - 1);
 
     for (WordNode *n = t->buckets[idx]; n; n = n->next)
     {
-        if (strcmp(n->word, word) == 0)
+        if (n->hash == hash && memcmp(n->word, word, len) == 0)
         {
             n->count++;
             t->total++;
@@ -104,13 +120,14 @@ static int word_table_add(WordTable *restrict t, const char *restrict word)
         }
     }
 
-    size_t len = strlen(word);
     WordNode *n =
             arena_alloc(&t->arena, sizeof *n + len + 1, _Alignof(WordNode));
     if (!n)
         return -1;
 
-    memcpy(n->word, word, len + 1);
+    memcpy(n->word, word, len);
+    n->word[len] = '\0';
+    n->hash = hash;
     n->count = 1;
     n->next = t->buckets[idx];
     t->buckets[idx] = n;
@@ -127,7 +144,7 @@ static int cmp_count_desc(const void *a, const void *b)
     return strcmp(wa->word, wb->word);
 }
 
-static WordCount *word_table_sorted(const WordTable *t, size_t *out_n)
+static WordCount *word_table_sorted(const WordTable *t)
 {
     WordCount *arr = malloc(t->unique * sizeof *arr);
     if (!arr)
@@ -139,7 +156,6 @@ static WordCount *word_table_sorted(const WordTable *t, size_t *out_n)
             arr[j++] = (WordCount){ n->word, n->count };
 
     qsort(arr, t->unique, sizeof *arr, cmp_count_desc);
-    *out_n = t->unique;
     return arr;
 }
 
@@ -150,62 +166,78 @@ static inline int is_letter(unsigned char c)
     return (c | 32u) - 'a' < 26u;
 }
 
-static const char *next_word(const char *restrict p,
-                             const char *restrict end,
-                             char *restrict buf,
-                             size_t bufsz)
+/*
+ * Advances *cursor past non-letters, then extracts a word into buf
+ * (lowercased), computing FNV-1a hash incrementally. Returns word
+ * length, or 0 if no word found before end.
+ */
+static size_t next_word(const char **cursor,
+                        const char *end,
+                        char *buf,
+                        size_t bufsz,
+                        uint32_t *out_hash)
 {
-    const unsigned char *s = (const unsigned char *)p;
+    const unsigned char *s = (const unsigned char *)*cursor;
     const unsigned char *e = (const unsigned char *)end;
 
     while (s < e && !is_letter(*s))
         s++;
     if (s >= e)
-        return NULL;
+    {
+        *cursor = (const char *)s;
+        return 0;
+    }
 
+    uint32_t h = FNV_OFFSET;
     size_t i = 0;
+
     while (s < e && is_letter(*s))
     {
+        unsigned char c = *s | 32u;
+        h = (h ^ c) * FNV_PRIME;
         if (i + 1 < bufsz)
-            buf[i++] = *s | 32u;
+            buf[i++] = c;
         s++;
     }
+
     buf[i] = '\0';
-    return (const char *)s;
+    *cursor = (const char *)s;
+    *out_hash = h;
+    return i;
 }
 
 static int process(WordTable *t, const char *data, size_t len)
 {
     const char *p = data, *end = data + len;
     char word[MAX_WORD];
+    uint32_t hash;
+    size_t wlen;
 
-    while ((p = next_word(p, end, word, sizeof word)))
-        if (word_table_add(t, word) < 0)
+    while ((wlen = next_word(&p, end, word, sizeof word, &hash)) > 0)
+        if (word_table_add(t, word, wlen, hash) < 0)
             return -1;
     return 0;
 }
 
 /* --- Output ------------------------------------------------------------- */
 
-static void print_results(const WordTable *t,
-                          const WordCount *words,
-                          size_t nwords,
-                          size_t file_size)
+static void
+print_results(const WordTable *t, const WordCount *words, size_t file_size)
 {
     puts("\n=== Top 10 Most Frequent Words ===");
     puts("  Rank  Word                 Count      %");
     puts("  ----  ---------------  ---------  -----");
 
-    size_t n = nwords < TOP_N ? nwords : TOP_N;
+    size_t n = t->unique < TOP_N ? t->unique : TOP_N;
     for (size_t i = 0; i < n; i++)
         printf("  %4zu  %-15s  %9zu  %5.2f\n",
                i + 1,
                words[i].word,
                words[i].count,
-               100.0 * words[i].count / t->total);
+               100.0 * (double)words[i].count / (double)t->total);
 
     puts("\n=== Statistics ===");
-    printf("File size:       %.2f MB\n", file_size / (1024.0 * 1024.0));
+    printf("File size:       %.2f MB\n", (double)file_size / (1024.0 * 1024.0));
     printf("Total words:     %zu\n", t->total);
     printf("Unique words:    %zu\n", t->unique);
 }
@@ -223,7 +255,7 @@ int main(int argc, char *argv[])
     const char *path = argv[1];
     int fd = -1, rc = EXIT_FAILURE;
     void *map = MAP_FAILED;
-    size_t size = 0;
+    size_t size = 0, arena_size = 0;
     WordTable table = { 0 };
     WordCount *sorted = NULL;
     struct stat st;
@@ -239,9 +271,21 @@ int main(int argc, char *argv[])
     }
 
     size = (size_t)st.st_size;
+
+    /* Hint sequential access pattern to kernel */
+    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+
     if ((map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
         goto err_mmap;
-    if (word_table_init(&table, size / 8 + 4096) < 0)
+
+    /* Advise sequential read-through for the mapped region */
+    (void)posix_madvise(map, size, POSIX_MADV_SEQUENTIAL);
+
+    arena_size = size / ARENA_DIVISOR;
+    if (arena_size < ARENA_MIN)
+        arena_size = ARENA_MIN;
+
+    if (word_table_init(&table, arena_size) < 0)
         goto err_mem;
     if (process(&table, map, size) < 0)
         goto err_mem;
@@ -253,10 +297,10 @@ int main(int argc, char *argv[])
         goto out;
     }
 
-    if (!(sorted = word_table_sorted(&table, &(size_t){ 0 })))
+    if (!(sorted = word_table_sorted(&table)))
         goto err_mem;
 
-    print_results(&table, sorted, table.unique, size);
+    print_results(&table, sorted, size);
     rc = EXIT_SUCCESS;
     goto out;
 

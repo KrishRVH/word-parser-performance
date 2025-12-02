@@ -3,46 +3,50 @@
 // -pthread wordcount_hyperopt.c -o wordcount_hopt -lm
 
 #define _GNU_SOURCE
+#include <errno.h>
+#include <execinfo.h>
+#include <fcntl.h>
+#include <immintrin.h>
+#include <nmmintrin.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <time.h>
-#include <pthread.h>
-#include <sched.h>
-#include <immintrin.h>
-#include <nmmintrin.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <fcntl.h>
+#include <time.h>
 #include <unistd.h>
-#include <errno.h>
-#include <signal.h>
-#include <execinfo.h>
 #ifndef DEBUG
 #define DBG(...) ((void)0)
-#define TIMING_START(x)                                                        \
-    do {                                                                       \
+#define TIMING_START(x) \
+    do                  \
+    {                   \
     } while (0)
-#define TIMING_END(x, desc)                                                    \
-    do {                                                                       \
+#define TIMING_END(x, desc) \
+    do                      \
+    {                       \
     } while (0)
-#define CHECK_NULL(p, desc)                                                    \
-    do {                                                                       \
+#define CHECK_NULL(p, desc) \
+    do                      \
+    {                       \
     } while (0)
-#define CHECK_RANGE(v, min, max, desc)                                         \
-    do {                                                                       \
+#define CHECK_RANGE(v, min, max, desc) \
+    do                                 \
+    {                                  \
     } while (0)
 #endif
 #ifdef DEBUG
-FILE* debug_log;
-uint64_t* collision_counts;
-uint64_t* probe_lengths;
+FILE *debug_log;
+uint64_t *collision_counts;
+uint64_t *probe_lengths;
 uint64_t max_probe_length = 0;
-double* thread_times;
-uint64_t* thread_word_counts;
-uint64_t* thread_unique_counts;
-uint64_t* thread_bytes_processed;
+double *thread_times;
+uint64_t *thread_word_counts;
+uint64_t *thread_unique_counts;
+uint64_t *thread_bytes_processed;
 uint64_t utf8_errors = 0;
 uint64_t utf8_sequences_2byte = 0;
 uint64_t utf8_sequences_3byte = 0;
@@ -56,49 +60,55 @@ uint64_t duplicate_merges = 0;
 uint64_t simd_chunks = 0;
 uint64_t scalar_chunks = 0;
 uint64_t pool_exhaustions = 0;
-uint64_t* hash_distribution;
+uint64_t *hash_distribution;
 uint64_t validation_checksum = 0;
 // Insert metrics
 uint64_t insert_hits = 0, insert_new = 0, insert_memcmp_calls = 0;
 uint64_t insert_memcmp_mismatch = 0, insert_fast_rejects = 0;
 uint64_t table_grow_ns_total = 0;
 uint64_t word_len_hist[8] = { 0 };
-int* thread_cpu_actual;
-#define DBG(...)                                                               \
-    do {                                                                       \
-        fprintf(debug_log, "[%s:%d] ", __func__, __LINE__);                    \
-        fprintf(debug_log, __VA_ARGS__);                                       \
-        fprintf(debug_log, "\n");                                              \
-        fflush(debug_log);                                                     \
+int *thread_cpu_actual;
+#define DBG(...)                                            \
+    do                                                      \
+    {                                                       \
+        fprintf(debug_log, "[%s:%d] ", __func__, __LINE__); \
+        fprintf(debug_log, __VA_ARGS__);                    \
+        fprintf(debug_log, "\n");                           \
+        fflush(debug_log);                                  \
     } while (0)
-#define TIMING_START(x)                                                        \
-    struct timespec _t1_##x;                                                   \
+#define TIMING_START(x)      \
+    struct timespec _t1_##x; \
     clock_gettime(CLOCK_MONOTONIC, &_t1_##x)
-#define TIMING_END(x, desc)                                                    \
-    do {                                                                       \
-        struct timespec _t2_##x;                                               \
-        clock_gettime(CLOCK_MONOTONIC, &_t2_##x);                              \
-        double _ms = (_t2_##x.tv_sec - _t1_##x.tv_sec) * 1000.0 +              \
-                     (_t2_##x.tv_nsec - _t1_##x.tv_nsec) / 1000000.0;          \
-        DBG("%s: %.3f ms", desc, _ms);                                         \
+#define TIMING_END(x, desc)                                           \
+    do                                                                \
+    {                                                                 \
+        struct timespec _t2_##x;                                      \
+        clock_gettime(CLOCK_MONOTONIC, &_t2_##x);                     \
+        double _ms = (_t2_##x.tv_sec - _t1_##x.tv_sec) * 1000.0 +     \
+                     (_t2_##x.tv_nsec - _t1_##x.tv_nsec) / 1000000.0; \
+        DBG("%s: %.3f ms", desc, _ms);                                \
     } while (0)
-#define CHECK_NULL(p, desc)                                                    \
-    do {                                                                       \
-        if (!(p)) {                                                            \
-            DBG("FATAL: NULL pointer: %s", desc);                              \
-            abort();                                                           \
-        }                                                                      \
+#define CHECK_NULL(p, desc)                       \
+    do                                            \
+    {                                             \
+        if (!(p))                                 \
+        {                                         \
+            DBG("FATAL: NULL pointer: %s", desc); \
+            abort();                              \
+        }                                         \
     } while (0)
-#define CHECK_RANGE(v, min, max, desc)                                         \
-    do {                                                                       \
-        if ((v) < (min) || (v) > (max)) {                                      \
-            DBG("FATAL: %s out of range: %ld (expected %ld-%ld)",              \
-                desc,                                                          \
-                (long)(v),                                                     \
-                (long)(min),                                                   \
-                (long)(max));                                                  \
-            abort();                                                           \
-        }                                                                      \
+#define CHECK_RANGE(v, min, max, desc)                            \
+    do                                                            \
+    {                                                             \
+        if ((v) < (min) || (v) > (max))                           \
+        {                                                         \
+            DBG("FATAL: %s out of range: %ld (expected %ld-%ld)", \
+                desc,                                             \
+                (long)(v),                                        \
+                (long)(min),                                      \
+                (long)(max));                                     \
+            abort();                                              \
+        }                                                         \
     } while (0)
 
 static inline int word_len_bucket(unsigned len)
@@ -167,8 +177,10 @@ void debug_dump_stats()
     DBG("SIMD chunks: %lu, Scalar chunks: %lu", simd_chunks, scalar_chunks);
 
     uint64_t total_probes = 0, total_collisions = 0;
-    for (int i = 0; i < 16; i++) {
-        if (thread_word_counts[i] > 0) {
+    for (int i = 0; i < 16; i++)
+    {
+        if (thread_word_counts[i] > 0)
+        {
             total_probes += probe_lengths[i];
             total_collisions += collision_counts[i];
             DBG("T%02d: %.3fms %lu words (%lu unique) %lu collisions (avg "
@@ -187,8 +199,10 @@ void debug_dump_stats()
         DBG("Overall avg probe length: %.2f",
             (double)total_probes / total_collisions);
 
-    for (int i = 0; i < 16; i++) {
-        if (thread_word_counts[i] > 0 || thread_times[i] > 0.0) {
+    for (int i = 0; i < 16; i++)
+    {
+        if (thread_word_counts[i] > 0 || thread_times[i] > 0.0)
+        {
             DBG("ThreadCPU T%02d: cpu=%d bytes=%lu",
                 i,
                 thread_cpu_actual ? thread_cpu_actual[i] : -1,
@@ -209,32 +223,35 @@ void debug_dump_stats()
 #define MAX_WORD 100
 #define TOP_N 100
 
-typedef struct {
-    char* word;
+typedef struct
+{
+    char *word;
     uint32_t count;
     uint32_t hash;
     uint16_t len;
     uint16_t fp16;
 } Entry;
 
-typedef struct __attribute__((aligned(CACHELINE))) {
-    Entry* entries;
-    char* string_pool;
+typedef struct __attribute__((aligned(CACHELINE)))
+{
+    Entry *entries;
+    char *string_pool;
     size_t pool_used;
     size_t capacity;
     size_t size;
     uint64_t total_words;
     int thread_id;
-    char** malloc_words;
+    char **malloc_words;
     size_t malloc_count;
     size_t malloc_cap;
 } ThreadTable;
 
-typedef struct {
-    const char* data;
+typedef struct
+{
+    const char *data;
     size_t start;
     size_t end;
-    ThreadTable* table;
+    ThreadTable *table;
     int thread_id;
     int drop_leading;
 } WorkUnit;
@@ -253,15 +270,17 @@ static void discover_vcache_cpus()
     int ncpus = (int)sysconf(_SC_NPROCESSORS_CONF);
     size_t best_l3_bytes = 0;
     int best_count = 0;
-    for (int cpu = 0; cpu < ncpus; cpu++) {
+    for (int cpu = 0; cpu < ncpus; cpu++)
+    {
         snprintf(path,
                  sizeof(path),
                  "/sys/devices/system/cpu/cpu%d/cache/index3/size",
                  cpu);
-        FILE* fsz = fopen(path, "r");
+        FILE *fsz = fopen(path, "r");
         if (!fsz)
             continue;
-        if (!fgets(sizebuf, sizeof(sizebuf), fsz)) {
+        if (!fgets(sizebuf, sizeof(sizebuf), fsz))
+        {
             fclose(fsz);
             continue;
         }
@@ -282,24 +301,28 @@ static void discover_vcache_cpus()
                  sizeof(path),
                  "/sys/devices/system/cpu/cpu%d/cache/index3/shared_cpu_list",
                  cpu);
-        FILE* f = fopen(path, "r");
+        FILE *f = fopen(path, "r");
         if (!f)
             continue;
-        if (!fgets(buf, sizeof(buf), f)) {
+        if (!fgets(buf, sizeof(buf), f))
+        {
             fclose(f);
             continue;
         }
         fclose(f);
 
         int list[256], cnt = 0;
-        char* p = buf;
-        while (*p && cnt < 256) {
+        char *p = buf;
+        while (*p && cnt < 256)
+        {
             int start = 0, end = 0;
-            if (sscanf(p, "%d-%d", &start, &end) == 2) {
+            if (sscanf(p, "%d-%d", &start, &end) == 2)
+            {
                 for (int i = start; i <= end && cnt < 256; i++)
                     list[cnt++] = i;
             }
-            else if (sscanf(p, "%d", &start) == 1) {
+            else if (sscanf(p, "%d", &start) == 1)
+            {
                 list[cnt++] = start;
             }
             while (*p && *p != ',')
@@ -308,7 +331,8 @@ static void discover_vcache_cpus()
                 p++;
         }
         if (l3_bytes > best_l3_bytes ||
-            (l3_bytes == best_l3_bytes && cnt > best_count)) {
+            (l3_bytes == best_l3_bytes && cnt > best_count))
+        {
             best_l3_bytes = l3_bytes;
             best_count = cnt;
             for (int j = 0; j < cnt && j < 256; j++)
@@ -317,7 +341,8 @@ static void discover_vcache_cpus()
         }
     }
 #ifdef DEBUG
-    if (vcache_cpu_count > 0) {
+    if (vcache_cpu_count > 0)
+    {
         DBG("V-Cache CCD detected: %d CPUs with %zu bytes L3",
             vcache_cpu_count,
             best_l3_bytes);
@@ -349,34 +374,38 @@ static inline uint32_t crc32c_finalize64(uint64_t h)
     h ^= h >> 33;
     return (uint32_t)h;
 }
-static inline uint32_t hash_word(const char* p, size_t len)
+static inline uint32_t hash_word(const char *p, size_t len)
 {
     uint64_t h = 0;
-    const uint8_t* s = (const uint8_t*)p;
-    while (len >= 8) {
+    const uint8_t *s = (const uint8_t *)p;
+    while (len >= 8)
+    {
         uint64_t v;
         memcpy(&v, s, 8);
         h = _mm_crc32_u64(h, v);
         s += 8;
         len -= 8;
     }
-    if (len >= 4) {
+    if (len >= 4)
+    {
         uint32_t v;
         memcpy(&v, s, 4);
         h = _mm_crc32_u32((uint32_t)h, v);
         s += 4;
         len -= 4;
     }
-    while (len--) {
+    while (len--)
+    {
         h = _mm_crc32_u8((uint32_t)h, *s++);
     }
     return crc32c_finalize64(h);
 }
 #else
-static inline uint32_t hash_word(const char* w, size_t len)
+static inline uint32_t hash_word(const char *w, size_t len)
 {
     uint32_t h = 2166136261u;
-    for (size_t i = 0; i < len; i++) {
+    for (size_t i = 0; i < len; i++)
+    {
         h ^= (uint8_t)w[i];
         h *= 16777619;
     }
@@ -385,25 +414,28 @@ static inline uint32_t hash_word(const char* w, size_t len)
 #endif
 
 // Unified aligned allocation helpers and macros (DEBUG + Release)
-static inline void* xaligned_alloc_portable(size_t align, size_t size)
+static inline void *xaligned_alloc_portable(size_t align, size_t size)
 {
     // Round size up to multiple of align (aligned_alloc requires this;
     // posix_memalign does not)
     size_t aligned_size = (size + (align - 1)) & ~(align - 1);
 
-    void* p = NULL;
+    void *p = NULL;
 
     // Try C11 aligned_alloc first if available, else posix_memalign
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
     // aligned_alloc is C11; still have a fallback in case it returns NULL
     p = aligned_alloc(align, aligned_size);
-    if (!p) {
-        if (posix_memalign(&p, align, aligned_size) != 0) {
+    if (!p)
+    {
+        if (posix_memalign(&p, align, aligned_size) != 0)
+        {
             p = NULL;
         }
     }
 #else
-    if (posix_memalign(&p, align, aligned_size) != 0) {
+    if (posix_memalign(&p, align, aligned_size) != 0)
+    {
         p = NULL;
     }
 #endif
@@ -411,10 +443,11 @@ static inline void* xaligned_alloc_portable(size_t align, size_t size)
 }
 
 #ifdef DEBUG
-static inline void* xaligned_alloc_dbg(size_t align, size_t size)
+static inline void *xaligned_alloc_dbg(size_t align, size_t size)
 {
-    void* p = xaligned_alloc_portable(align, size);
-    if (p) {
+    void *p = xaligned_alloc_portable(align, size);
+    if (p)
+    {
         // account for rounded size in DEBUG accounting
         size_t aligned_size = (size + (align - 1)) & ~(align - 1);
         memory_allocated += aligned_size;
@@ -422,55 +455,60 @@ static inline void* xaligned_alloc_dbg(size_t align, size_t size)
     return p;
 }
 
-#define MEMORY_ALLOC(size)                                                     \
-    ({                                                                         \
-        void* _p = malloc(size);                                               \
-        if (_p)                                                                \
-            memory_allocated += (size);                                        \
-        CHECK_NULL(_p, "malloc");                                              \
-        _p;                                                                    \
+#define MEMORY_ALLOC(size)              \
+    ({                                  \
+        void *_p = malloc(size);        \
+        if (_p)                         \
+            memory_allocated += (size); \
+        CHECK_NULL(_p, "malloc");       \
+        _p;                             \
     })
 
-#define MEMORY_ALLOC_ALIGNED(align, size)                                      \
-    ({                                                                         \
-        void* _p = xaligned_alloc_dbg((align), (size));                        \
-        CHECK_NULL(_p, "aligned_alloc/posix_memalign");                        \
-        _p;                                                                    \
+#define MEMORY_ALLOC_ALIGNED(align, size)               \
+    ({                                                  \
+        void *_p = xaligned_alloc_dbg((align), (size)); \
+        CHECK_NULL(_p, "aligned_alloc/posix_memalign"); \
+        _p;                                             \
     })
 
-#define MEMORY_FREE(p, size)                                                   \
-    do {                                                                       \
-        free(p);                                                               \
-        memory_freed += (size);                                                \
+#define MEMORY_FREE(p, size)    \
+    do                          \
+    {                           \
+        free(p);                \
+        memory_freed += (size); \
     } while (0)
 
-#else // Release
+#else  // Release
 
 #define MEMORY_ALLOC(size) malloc(size)
 
-#define MEMORY_ALLOC_ALIGNED(align, size)                                      \
+#define MEMORY_ALLOC_ALIGNED(align, size) \
     xaligned_alloc_portable((align), (size))
 
 #define MEMORY_FREE(p, size) free(p)
 
-#endif // DEBUG
+#endif  // DEBUG
 
-static inline char* pool_alloc(ThreadTable* t, size_t len)
+static inline char *pool_alloc(ThreadTable *t, size_t len)
 {
-    if (t->pool_used + len + 1 > STRING_POOL_SIZE) {
+    if (t->pool_used + len + 1 > STRING_POOL_SIZE)
+    {
 #ifdef DEBUG
         pool_exhaustions++;
 #endif
-        char* p = (char*)malloc(len + 1);
-        if (!p) {
+        char *p = (char *)malloc(len + 1);
+        if (!p)
+        {
             perror("malloc");
             exit(1);
         }
-        if (t->malloc_count == t->malloc_cap) {
+        if (t->malloc_count == t->malloc_cap)
+        {
             size_t new_cap = t->malloc_cap ? t->malloc_cap * 2 : 1024;
-            char** new_arr =
-                    (char**)realloc(t->malloc_words, new_cap * sizeof(char*));
-            if (!new_arr) {
+            char **new_arr =
+                    (char **)realloc(t->malloc_words, new_cap * sizeof(char *));
+            if (!new_arr)
+            {
                 perror("realloc");
                 exit(1);
             }
@@ -480,23 +518,24 @@ static inline char* pool_alloc(ThreadTable* t, size_t len)
         t->malloc_words[t->malloc_count++] = p;
         return p;
     }
-    char* ptr = t->string_pool + t->pool_used;
+    char *ptr = t->string_pool + t->pool_used;
     t->pool_used += (len + 1 + 7) & ~7;
     return ptr;
 }
 
-static void table_grow(ThreadTable* t)
+static void table_grow(ThreadTable *t)
 {
     size_t new_cap = t->capacity * 2;
-    Entry* new_entries =
-            (Entry*)MEMORY_ALLOC_ALIGNED(CACHELINE, new_cap * sizeof(Entry));
+    Entry *new_entries =
+            (Entry *)MEMORY_ALLOC_ALIGNED(CACHELINE, new_cap * sizeof(Entry));
     memset(new_entries, 0, new_cap * sizeof(Entry));
 #ifdef DEBUG
     struct timespec _tg1, _tg2;
     clock_gettime(CLOCK_MONOTONIC, &_tg1);
 #endif
     size_t mask = new_cap - 1;
-    for (size_t i = 0; i < t->capacity; i++) {
+    for (size_t i = 0; i < t->capacity; i++)
+    {
         Entry e = t->entries[i];
         if (!e.word)
             continue;
@@ -518,13 +557,14 @@ static void table_grow(ThreadTable* t)
 #endif
 }
 
-static inline void table_insert_hashed(ThreadTable* t,
-                                       const char* word,
+static inline void table_insert_hashed(ThreadTable *t,
+                                       const char *word,
                                        size_t len,
                                        uint32_t hash,
                                        uint16_t fp)
 {
-    if (len == 0 || len >= MAX_WORD) {
+    if (len == 0 || len >= MAX_WORD)
+    {
 #ifdef DEBUG
         if (len == 0)
             empty_words++;
@@ -539,10 +579,12 @@ static inline void table_insert_hashed(ThreadTable* t,
     hash_distribution[hash & 0xFF]++;
 #endif
     size_t start_idx = idx;
-    do {
-        Entry* e = &t->entries[idx];
-        if (!e->word) {
-            char* stored = pool_alloc(t, len);
+    do
+    {
+        Entry *e = &t->entries[idx];
+        if (!e->word)
+        {
+            char *stored = pool_alloc(t, len);
             memcpy(stored, word, len);
             stored[len] = '\0';
             e->word = stored;
@@ -553,16 +595,17 @@ static inline void table_insert_hashed(ThreadTable* t,
             t->size++;
             t->total_words++;
 #ifdef __SSE2__
-            _mm_prefetch((const char*)&t->entries[(idx + 1) & mask],
+            _mm_prefetch((const char *)&t->entries[(idx + 1) & mask],
                          _MM_HINT_T0);
-            _mm_prefetch((const char*)&t->entries[(idx + 8) & mask],
+            _mm_prefetch((const char *)&t->entries[(idx + 8) & mask],
                          _MM_HINT_T2);
 #endif
 #ifdef DEBUG
             thread_unique_counts[t->thread_id]++;
             thread_word_counts[t->thread_id]++;
             insert_new++;
-            if (probes > 0) {
+            if (probes > 0)
+            {
                 collision_counts[t->thread_id]++;
                 probe_lengths[t->thread_id] += probes;
                 if (probes > max_probe_length)
@@ -573,11 +616,13 @@ static inline void table_insert_hashed(ThreadTable* t,
                 table_grow(t);
             return;
         }
-        if (e->hash == hash && e->len == len && e->fp16 == fp) {
+        if (e->hash == hash && e->len == len && e->fp16 == fp)
+        {
 #ifdef DEBUG
             insert_memcmp_calls++;
 #endif
-            if (memcmp(e->word, word, len) == 0) {
+            if (memcmp(e->word, word, len) == 0)
+            {
                 e->count++;
                 t->total_words++;
 #ifdef DEBUG
@@ -586,13 +631,15 @@ static inline void table_insert_hashed(ThreadTable* t,
 #endif
                 return;
             }
-            else {
+            else
+            {
 #ifdef DEBUG
                 insert_memcmp_mismatch++;
 #endif
             }
         }
-        else {
+        else
+        {
 #ifdef DEBUG
             insert_fast_rejects++;
 #endif
@@ -612,9 +659,10 @@ static inline void table_insert_hashed(ThreadTable* t,
 #endif
 }
 
-static inline void table_insert(ThreadTable* t, const char* word, size_t len)
+static inline void table_insert(ThreadTable *t, const char *word, size_t len)
 {
-    if (len == 0 || len >= MAX_WORD) {
+    if (len == 0 || len >= MAX_WORD)
+    {
 #ifdef DEBUG
         if (len == 0)
             empty_words++;
@@ -634,22 +682,25 @@ static inline int is_ascii_letter(unsigned char c)
 }
 
 static void
-process_chunk(ThreadTable* t, const char* data, size_t size, int drop_leading)
+process_chunk(ThreadTable *t, const char *data, size_t size, int drop_leading)
 {
     char word[MAX_WORD];
     size_t word_len = 0;
 #if defined(__SSE4_2__)
     uint64_t crc = 0;
 #endif
-    for (size_t i = 0; i < size; i++) {
+    for (size_t i = 0; i < size; i++)
+    {
         unsigned char c = data[i];
-        if (drop_leading) {
+        if (drop_leading)
+        {
             if (!is_ascii_letter(c))
                 drop_leading = 0;
             else
                 continue;
         }
-        if (c >= 0x80) {
+        if (c >= 0x80)
+        {
 #ifdef DEBUG
             if ((c & 0xE0) == 0xC0)
                 utf8_sequences_2byte++;
@@ -662,7 +713,8 @@ process_chunk(ThreadTable* t, const char* data, size_t size, int drop_leading)
 #endif
             while (i + 1 < size && (data[i + 1] & 0xC0) == 0x80)
                 i++;
-            if (word_len > 0) {
+            if (word_len > 0)
+            {
                 word[word_len] = '\0';
 #if defined(__SSE4_2__)
                 uint32_t h32 = crc32c_finalize64(crc);
@@ -678,8 +730,10 @@ process_chunk(ThreadTable* t, const char* data, size_t size, int drop_leading)
                 word_len = 0;
             }
         }
-        else if (is_ascii_letter(c)) {
-            if (word_len < MAX_WORD - 1) {
+        else if (is_ascii_letter(c))
+        {
+            if (word_len < MAX_WORD - 1)
+            {
                 char lc = (char)(c | 0x20);
                 word[word_len++] = lc;
 #if defined(__SSE4_2__)
@@ -687,7 +741,8 @@ process_chunk(ThreadTable* t, const char* data, size_t size, int drop_leading)
 #endif
             }
         }
-        else if (word_len > 0) {
+        else if (word_len > 0)
+        {
             word[word_len] = '\0';
 #if defined(__SSE4_2__)
             uint32_t h32 = crc32c_finalize64(crc);
@@ -703,7 +758,8 @@ process_chunk(ThreadTable* t, const char* data, size_t size, int drop_leading)
             word_len = 0;
         }
     }
-    if (word_len > 0) {
+    if (word_len > 0)
+    {
         word[word_len] = '\0';
 #if defined(__SSE4_2__)
         uint32_t h32 = crc32c_finalize64(crc);
@@ -718,8 +774,8 @@ process_chunk(ThreadTable* t, const char* data, size_t size, int drop_leading)
     }
 }
 
-static void process_chunk_avx512(ThreadTable* t,
-                                 const char* data,
+static void process_chunk_avx512(ThreadTable *t,
+                                 const char *data,
                                  size_t size,
                                  int drop_leading)
 {
@@ -732,11 +788,12 @@ static void process_chunk_avx512(ThreadTable* t,
     uint64_t crc = 0;
 #endif
     const size_t simd_end = size - (size % 64);
-    for (; i < simd_end; i += 64) {
+    for (; i < simd_end; i += 64)
+    {
 #ifdef DEBUG
         simd_chunks++;
 #endif
-        __m512i chunk = _mm512_loadu_si512((const __m512i*)(data + i));
+        __m512i chunk = _mm512_loadu_si512((const __m512i *)(data + i));
         __mmask64 ascii_mask =
                 _mm512_cmplt_epu8_mask(chunk, _mm512_set1_epi8(0x80));
         __m512i up = _mm512_sub_epi8(chunk, _mm512_set1_epi8('A'));
@@ -745,8 +802,10 @@ static void process_chunk_avx512(ThreadTable* t,
         __mmask64 m_lo = _mm512_cmplt_epu8_mask(lo, _mm512_set1_epi8(26));
         uint64_t letters = (uint64_t)((m_up | m_lo) & ascii_mask);
 
-        if (prev_tail_letter && ((letters & 1ull) == 0)) {
-            if (word_len > 0) {
+        if (prev_tail_letter && ((letters & 1ull) == 0))
+        {
+            if (word_len > 0)
+            {
                 word[word_len] = '\0';
 #if defined(__SSE4_2__)
                 uint32_t h32 = crc32c_finalize64(crc);
@@ -764,19 +823,23 @@ static void process_chunk_avx512(ThreadTable* t,
             prev_tail_letter = 0;
         }
 
-        if (drop_leading && (letters & 1ull)) {
+        if (drop_leading && (letters & 1ull))
+        {
             if ((~letters) == 0ull)
                 continue;
             unsigned lead = __builtin_ctzll(~letters);
             letters &= (~0ull << lead);
             drop_leading = 0;
         }
-        else if (drop_leading) {
+        else if (drop_leading)
+        {
             drop_leading = 0;
         }
 
-        if (letters == 0ull) {
-            if (word_len > 0) {
+        if (letters == 0ull)
+        {
+            if (word_len > 0)
+            {
                 word[word_len] = '\0';
 #if defined(__SSE4_2__)
                 uint32_t h32 = crc32c_finalize64(crc);
@@ -800,13 +863,15 @@ static void process_chunk_avx512(ThreadTable* t,
 #endif
 
         uint64_t m = letters;
-        while (m) {
+        while (m)
+        {
             unsigned start = __builtin_ctzll(m);
             uint64_t tail = m >> start;
             unsigned run_len =
                     ((~tail) == 0ull) ? (64 - start) : __builtin_ctzll(~tail);
 
-            if (start > 0 && word_len > 0) {
+            if (start > 0 && word_len > 0)
+            {
                 word[word_len] = '\0';
 #if defined(__SSE4_2__)
                 uint32_t h32 = crc32c_finalize64(crc);
@@ -822,8 +887,9 @@ static void process_chunk_avx512(ThreadTable* t,
                 word_len = 0;
             }
 
-            const char* src = data + i + start;
-            for (unsigned k = 0; k < run_len && word_len < MAX_WORD - 1; k++) {
+            const char *src = data + i + start;
+            for (unsigned k = 0; k < run_len && word_len < MAX_WORD - 1; k++)
+            {
                 char lc = (char)(src[k] | 0x20);
                 word[word_len++] = lc;
 #if defined(__SSE4_2__)
@@ -831,8 +897,10 @@ static void process_chunk_avx512(ThreadTable* t,
 #endif
             }
 
-            if ((start + run_len) < 64) {
-                if (word_len > 0) {
+            if ((start + run_len) < 64)
+            {
+                if (word_len > 0)
+                {
                     word[word_len] = '\0';
 #if defined(__SSE4_2__)
                     uint32_t h32 = crc32c_finalize64(crc);
@@ -849,7 +917,8 @@ static void process_chunk_avx512(ThreadTable* t,
                 }
                 prev_tail_letter = 0;
             }
-            else {
+            else
+            {
                 prev_tail_letter = 1;
             }
 
@@ -862,18 +931,22 @@ static void process_chunk_avx512(ThreadTable* t,
         }
     }
 
-    for (; i < size; i++) {
+    for (; i < size; i++)
+    {
         unsigned char c = data[i];
-        if (drop_leading) {
+        if (drop_leading)
+        {
             if (!is_ascii_letter(c))
                 drop_leading = 0;
             else
                 continue;
         }
-        if (c >= 0x80) {
+        if (c >= 0x80)
+        {
             while (i + 1 < size && (data[i + 1] & 0xC0) == 0x80)
                 i++;
-            if (word_len > 0) {
+            if (word_len > 0)
+            {
                 word[word_len] = '\0';
 #if defined(__SSE4_2__)
                 uint32_t h32 = crc32c_finalize64(crc);
@@ -889,8 +962,10 @@ static void process_chunk_avx512(ThreadTable* t,
                 word_len = 0;
             }
         }
-        else if (is_ascii_letter(c)) {
-            if (word_len < MAX_WORD - 1) {
+        else if (is_ascii_letter(c))
+        {
+            if (word_len < MAX_WORD - 1)
+            {
                 char lc = (char)(c | 0x20);
                 word[word_len++] = lc;
 #if defined(__SSE4_2__)
@@ -898,7 +973,8 @@ static void process_chunk_avx512(ThreadTable* t,
 #endif
             }
         }
-        else if (word_len > 0) {
+        else if (word_len > 0)
+        {
             word[word_len] = '\0';
 #if defined(__SSE4_2__)
             uint32_t h32 = crc32c_finalize64(crc);
@@ -915,7 +991,8 @@ static void process_chunk_avx512(ThreadTable* t,
         }
     }
 
-    if (word_len > 0) {
+    if (word_len > 0)
+    {
         word[word_len] = '\0';
 #if defined(__SSE4_2__)
         uint32_t h32 = crc32c_finalize64(crc);
@@ -933,9 +1010,9 @@ static void process_chunk_avx512(ThreadTable* t,
 #endif
 }
 
-static void* worker(void* arg)
+static void *worker(void *arg)
 {
-    WorkUnit* unit = (WorkUnit*)arg;
+    WorkUnit *unit = (WorkUnit *)arg;
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     int cpu_id = unit->thread_id;
@@ -971,36 +1048,40 @@ static void* worker(void* arg)
     return NULL;
 }
 
-static Entry*
-merge_tables(size_t* total_unique, size_t* total_words, size_t* out_capacity)
+static Entry *
+merge_tables(size_t *total_unique, size_t *total_words, size_t *out_capacity)
 {
     size_t estimated = 0;
     for (int i = 0; i < NUM_THREADS; i++)
         estimated += tables[i].size;
 
     size_t global_cap = next_pow2(estimated * 2);
-    Entry* global = MEMORY_ALLOC_ALIGNED(CACHELINE, global_cap * sizeof(Entry));
+    Entry *global = MEMORY_ALLOC_ALIGNED(CACHELINE, global_cap * sizeof(Entry));
     memset(global, 0, global_cap * sizeof(Entry));
 
     size_t global_size = 0;
     *total_words = 0;
 
-    for (int t = 0; t < NUM_THREADS; t++) {
-        ThreadTable* tbl = &tables[t];
+    for (int t = 0; t < NUM_THREADS; t++)
+    {
+        ThreadTable *tbl = &tables[t];
         *total_words += tbl->total_words;
-        for (size_t i = 0; i < tbl->capacity; i++) {
+        for (size_t i = 0; i < tbl->capacity; i++)
+        {
             if (!tbl->entries[i].word)
                 continue;
             uint32_t hash = tbl->entries[i].hash;
             uint16_t fp = tbl->entries[i].fp16;
             size_t idx = hash & (global_cap - 1);
-            while (global[idx].word) {
+            while (global[idx].word)
+            {
                 if (global[idx].hash == hash &&
                     global[idx].len == tbl->entries[i].len &&
                     global[idx].fp16 == fp &&
                     memcmp(global[idx].word,
                            tbl->entries[i].word,
-                           tbl->entries[i].len) == 0) {
+                           tbl->entries[i].len) == 0)
+                {
                     global[idx].count += tbl->entries[i].count;
 #ifdef DEBUG
                     duplicate_merges++;
@@ -1019,29 +1100,31 @@ next_word:;
     return global;
 }
 
-static int cmp_entry(const void* a, const void* b)
+static int cmp_entry(const void *a, const void *b)
 {
-    const Entry* ea = (const Entry*)a;
-    const Entry* eb = (const Entry*)b;
+    const Entry *ea = (const Entry *)a;
+    const Entry *eb = (const Entry *)b;
     if (eb->count != ea->count)
         return (eb->count > ea->count) ? 1 : -1;
     return strcmp(ea->word, eb->word);
 }
 
-typedef struct {
-    Entry* entries;
+typedef struct
+{
+    Entry *entries;
     int size;
     int capacity;
 } MinHeap;
-static inline void heap_swap(Entry* a, Entry* b)
+static inline void heap_swap(Entry *a, Entry *b)
 {
     Entry t = *a;
     *a = *b;
     *b = t;
 }
-static void heap_sift_up(MinHeap* h, int i)
+static void heap_sift_up(MinHeap *h, int i)
 {
-    while (i > 0) {
+    while (i > 0)
+    {
         int p = (i - 1) / 2;
         if (h->entries[p].count <= h->entries[i].count)
             break;
@@ -1049,9 +1132,10 @@ static void heap_sift_up(MinHeap* h, int i)
         i = p;
     }
 }
-static void heap_sift_down(MinHeap* h, int i)
+static void heap_sift_down(MinHeap *h, int i)
 {
-    for (;;) {
+    for (;;)
+    {
         int l = 2 * i + 1, r = l + 1, s = i;
         if (l < h->size && h->entries[l].count < h->entries[s].count)
             s = l;
@@ -1063,20 +1147,22 @@ static void heap_sift_down(MinHeap* h, int i)
         i = s;
     }
 }
-static inline void heap_push(MinHeap* h, Entry e)
+static inline void heap_push(MinHeap *h, Entry e)
 {
-    if (h->size < h->capacity) {
+    if (h->size < h->capacity)
+    {
         h->entries[h->size] = e;
         heap_sift_up(h, h->size);
         h->size++;
     }
-    else if (e.count > h->entries[0].count) {
+    else if (e.count > h->entries[0].count)
+    {
         h->entries[0] = e;
         heap_sift_down(h, 0);
     }
 }
 
-static void format_number(char* buf, uint64_t n)
+static void format_number(char *buf, uint64_t n)
 {
     char tmp[32];
     sprintf(tmp, "%lu", n);
@@ -1084,8 +1170,10 @@ static void format_number(char* buf, uint64_t n)
     int commas = (len - 1) / 3, out_len = len + commas;
     buf[out_len] = '\0';
     int t = len - 1, o = out_len - 1, d = 0;
-    while (t >= 0) {
-        if (d == 3) {
+    while (t >= 0)
+    {
+        if (d == 3)
+        {
             buf[o--] = ',';
             d = 0;
         }
@@ -1094,9 +1182,9 @@ static void format_number(char* buf, uint64_t n)
     }
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
-    const char* filename = (argc > 1) ? argv[1] : "book.txt";
+    const char *filename = (argc > 1) ? argv[1] : "book.txt";
 #ifdef DEBUG
     debug_init();
     signal(SIGSEGV, signal_handler);
@@ -1119,12 +1207,14 @@ int main(int argc, char* argv[])
     clock_gettime(CLOCK_MONOTONIC, &total_start);
 
     int fd = open(filename, O_RDONLY);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         perror("open");
         return 1;
     }
     struct stat st;
-    if (fstat(fd, &st) != 0) {
+    if (fstat(fd, &st) != 0)
+    {
         perror("fstat");
         close(fd);
         return 1;
@@ -1132,8 +1222,9 @@ int main(int argc, char* argv[])
     size_t file_size = st.st_size;
 
     TIMING_START(mmap);
-    char* data = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (data == MAP_FAILED) {
+    char *data = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED)
+    {
         perror("mmap");
         close(fd);
         return 1;
@@ -1145,9 +1236,11 @@ int main(int argc, char* argv[])
     cuts[0] = 0;
     cuts[NUM_THREADS] = file_size;
     size_t approx = file_size / NUM_THREADS;
-    for (int i = 1; i < NUM_THREADS; i++) {
+    for (int i = 1; i < NUM_THREADS; i++)
+    {
         size_t c = i * approx;
-        while (c < file_size && is_ascii_letter((unsigned char)data[c])) {
+        while (c < file_size && is_ascii_letter((unsigned char)data[c]))
+        {
             c++;
         }
         cuts[i] = c;
@@ -1158,8 +1251,9 @@ int main(int argc, char* argv[])
 
     // Initialize per-thread tables (size by actual slice)
     TIMING_START(init);
-    for (int i = 0; i < NUM_THREADS; i++) {
-        size_t chunk_size = cuts[i + 1] - cuts[i]; // use cuts
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        size_t chunk_size = cuts[i + 1] - cuts[i];  // use cuts
         size_t estimated_words = chunk_size / 5;
         size_t estimated_unique = estimated_words / 10;
 
@@ -1189,13 +1283,14 @@ int main(int argc, char* argv[])
 
     // Launch threads using the non-overlapping cuts
     pthread_barrier_init(&barrier, NULL, NUM_THREADS + 1);
-    for (int i = 0; i < NUM_THREADS; i++) {
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
         units[i].data = data;
         units[i].start = cuts[i];
         units[i].end = cuts[i + 1];
         units[i].table = &tables[i];
         units[i].thread_id = i;
-        units[i].drop_leading = 0; // non-overlap means no need to drop
+        units[i].drop_leading = 0;  // non-overlap means no need to drop
 
         pthread_create(&threads[i], NULL, worker, &units[i]);
     }
@@ -1209,14 +1304,15 @@ int main(int argc, char* argv[])
 
     TIMING_START(merge);
     size_t total_unique, total_words, global_capacity;
-    Entry* global = merge_tables(&total_unique, &total_words, &global_capacity);
+    Entry *global = merge_tables(&total_unique, &total_words, &global_capacity);
     TIMING_END(merge, "merge");
 
     TIMING_START(topk);
-    Entry* top_words;
+    Entry *top_words;
     size_t top_count;
     size_t top_words_bytes = 0;
-    if (total_unique > TOP_N * 10) {
+    if (total_unique > TOP_N * 10)
+    {
         MinHeap heap = { .entries = MEMORY_ALLOC(TOP_N * sizeof(Entry)),
                          .size = 0,
                          .capacity = TOP_N };
@@ -1228,8 +1324,9 @@ int main(int argc, char* argv[])
         top_count = heap.size;
         top_words_bytes = TOP_N * sizeof(Entry);
     }
-    else {
-        Entry* words =
+    else
+    {
+        Entry *words =
                 MEMORY_ALLOC_ALIGNED(CACHELINE, total_unique * sizeof(Entry));
         size_t word_count = 0;
         for (size_t i = 0; i < global_capacity && word_count < total_unique;
@@ -1256,7 +1353,8 @@ int main(int argc, char* argv[])
     format_number(unique_str, total_unique);
 
     printf("=== Top 10 Words ===\n");
-    for (int i = 0; i < 10 && i < (int)top_count; i++) {
+    for (int i = 0; i < 10 && i < (int)top_count; i++)
+    {
         char count_str[32];
         format_number(count_str, top_words[i].count);
         printf("%2d. %-15s %9s\n", i + 1, top_words[i].word, count_str);
@@ -1280,8 +1378,9 @@ int main(int argc, char* argv[])
              (int)(strrchr(filename, '.') ? strrchr(filename, '.') - filename
                                           : strlen(filename)),
              filename);
-    FILE* out = fopen(outfile, "w");
-    if (out) {
+    FILE *out = fopen(outfile, "w");
+    if (out)
+    {
         fprintf(out, "Word Frequency Analysis\n");
         fprintf(out, "File: %s\n", filename);
         fprintf(out, "Time: %.2f ms\n", exec_ms);
@@ -1291,7 +1390,8 @@ int main(int argc, char* argv[])
         fprintf(out, "Total: %lu\n", total_words);
         fprintf(out, "Unique: %lu\n\n", total_unique);
         fprintf(out, "Top 100:\n");
-        for (int i = 0; i < TOP_N && i < (int)top_count; i++) {
+        for (int i = 0; i < TOP_N && i < (int)top_count; i++)
+        {
             fprintf(out,
                     "%4d  %-15s %9u %6.2f%%\n",
                     i + 1,
@@ -1303,7 +1403,8 @@ int main(int argc, char* argv[])
         printf("\nResults: %s\n", outfile);
     }
 
-    for (int i = 0; i < NUM_THREADS; i++) {
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
         for (size_t j = 0; j < tables[i].malloc_count; j++)
             free(tables[i].malloc_words[j]);
         free(tables[i].malloc_words);

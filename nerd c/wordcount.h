@@ -113,15 +113,16 @@
  * Standard includes
  *===========================================================================*/
 
-#include <stddef.h>  /* size_t, NULL */
 #include <stdbool.h> /* bool (C99+) */
+#include <stddef.h>  /* size_t, NULL */
 
 /*===========================================================================
  * C++ compatibility
  *===========================================================================*/
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 /*===========================================================================
@@ -144,8 +145,9 @@ typedef struct wc_table wc_table;
  *       valid only until `wc_destroy()` is called on that table. Clients
  *       must not free or modify this pointer.
  */
-typedef struct wc_entry {
-    const char* word; /**< NUL-terminated word string (table-owned). */
+typedef struct wc_entry
+{
+    const char *word; /**< NUL-terminated word string (table-owned). */
     size_t count;     /**< Number of occurrences of this word. */
 } wc_entry;
 
@@ -155,7 +157,8 @@ typedef struct wc_entry {
  * All fallible operations return a `wc_status` to indicate success or
  * the category of failure. Check for `WC_OK` to confirm success.
  */
-typedef enum wc_status {
+typedef enum wc_status
+{
     WC_OK = 0,               /**< Operation completed successfully. */
     WC_ERR_INVALID_ARGUMENT, /**< A required argument was NULL or invalid. */
     WC_ERR_OUT_OF_MEMORY     /**< Memory allocation failed. */
@@ -174,7 +177,8 @@ typedef enum wc_status {
  * wc_table *t = wc_create(&cfg);
  * ```
  */
-typedef struct wc_config {
+typedef struct wc_config
+{
     /**
      * @brief Desired minimum number of hash buckets.
      *
@@ -218,7 +222,7 @@ typedef struct wc_config {
  * concurrent access to the same table requires external synchronization.
  */
 WC_NODISCARD
-wc_table* wc_create(const wc_config* cfg);
+wc_table *wc_create(const wc_config *cfg);
 
 /**
  * @brief Destroy a table and release all associated memory.
@@ -233,7 +237,7 @@ wc_table* wc_create(const wc_config* cfg);
  * are accessing the table during destruction. Safe to call concurrently
  * on different table instances.
  */
-void wc_destroy(wc_table* t);
+void wc_destroy(wc_table *t);
 
 /*===========================================================================
  * Word insertion functions
@@ -266,7 +270,7 @@ void wc_destroy(wc_table* t);
  * Amortized O(1) average case; O(n) worst case if many collisions.
  */
 WC_NODISCARD
-wc_status wc_add_word(wc_table* t, const char* word);
+wc_status wc_add_word(wc_table *t, const char *word);
 
 /**
  * @brief Process raw text and count all words.
@@ -300,7 +304,7 @@ wc_status wc_add_word(wc_table* t, const char* word);
  * O(len) for scanning, plus O(unique_words) hash table operations.
  */
 WC_NODISCARD
-wc_status wc_process_text(wc_table* t, const char* data, size_t len);
+wc_status wc_process_text(wc_table *t, const char *data, size_t len);
 
 /*===========================================================================
  * Query functions
@@ -316,7 +320,7 @@ wc_status wc_process_text(wc_table* t, const char* data, size_t len);
  * @return   Total word count, or 0 if `t` is NULL.
  */
 WC_PURE
-size_t wc_total_words(const wc_table* t);
+size_t wc_total_words(const wc_table *t);
 
 /**
  * @brief Get the number of distinct (unique) words in the table.
@@ -327,7 +331,7 @@ size_t wc_total_words(const wc_table* t);
  * @return   Unique word count, or 0 if `t` is NULL.
  */
 WC_PURE
-size_t wc_unique_words(const wc_table* t);
+size_t wc_unique_words(const wc_table *t);
 
 /*===========================================================================
  * Snapshot functions
@@ -362,7 +366,7 @@ size_t wc_unique_words(const wc_table* t);
  */
 WC_NODISCARD
 wc_status
-wc_snapshot(const wc_table* t, wc_entry** out_entries, size_t* out_len);
+wc_snapshot(const wc_table *t, wc_entry **out_entries, size_t *out_len);
 
 /**
  * @brief Free a snapshot array obtained from wc_snapshot().
@@ -374,7 +378,7 @@ wc_snapshot(const wc_table* t, wc_entry** out_entries, size_t* out_len);
  * @note Do NOT call `free()` directly on the array; always use this
  *       function to ensure future compatibility.
  */
-void wc_free_snapshot(wc_entry* entries);
+void wc_free_snapshot(wc_entry *entries);
 
 /*===========================================================================
  * Version information
@@ -389,7 +393,7 @@ void wc_free_snapshot(wc_entry* entries);
  * @return Static string in "MAJOR.MINOR.PATCH" format, never NULL.
  */
 WC_PURE
-const char* wc_version(void);
+const char *wc_version(void);
 
 #ifdef __cplusplus
 }

@@ -153,7 +153,7 @@ fi
 if [ "$HAS_GCC" = "1" ]; then
     echo "Compiling C reference..."
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops \
-        ./build/wordcount.c -o wordcount_c 2>/dev/null
+        ./wordcount.c -o wordcount_c 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "✓ C compilation successful"
     else
