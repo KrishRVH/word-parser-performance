@@ -119,17 +119,15 @@ run_clang_tidy() {
     local tidy_errors=0
 
     run_tidy_on_file() {
-        local f="$1"
-        shift
-        local -a args=("$@")
+    local f="$1"
+    shift
+    local -a args=("$@")
 
-        # If no compile_commands.json, add fallback compiler flags
-        if [[ ! " ${args[*]} " =~ " -p " ]]; then
-            clang-tidy "${args[@]}" "$f" -- -std=c11 -Wall -Wextra -Wpedantic
-        else
-            clang-tidy "${args[@]}" "$f"
-        fi
-    }
+    if [[ ! " ${args[*]} " =~ " -p " ]]; then
+        fatal "No compile_commands.json found; generate with cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+    fi
+    clang-tidy "${args[@]}" "$f"
+	}
     export -f run_tidy_on_file
 
     # Run in parallel; collect exit status
@@ -150,33 +148,48 @@ run_cppcheck() {
     local root="$1"
     note "Running cppcheck (jobs=$JOBS)"
 
-    # Collect files the same way as other tools
-    local -a files
-    mapfile -d '' files < <(collect_files "$root" '*.c' '*.h')
-
-    if ((${#files[@]} == 0)); then
-        warn "No .c/.h files found for cppcheck."
-        return 0
-    fi
-
-    # cppcheck quirks:
-    #   - unusedFunction incompatible with -j
-    #   - toomanyconfigs/checkersReport are info noise
-    printf '%s\0' "${files[@]}" | xargs -0 \
+    local cdb_root
+    if cdb_root=$(find_config_root "$root" compile_commands.json); then
+        note "Using compile_commands.json for cppcheck"
         cppcheck \
+            --project="$cdb_root/compile_commands.json" \
             --enable=warning,style,performance,portability \
             --inconclusive \
-            --std=c11 \
-            --platform=unix64 \
             --suppress=missingIncludeSystem \
             --suppress=unmatchedSuppression \
-            --suppress=knownConditionTrueFalse \
             --quiet \
             --error-exitcode=1 \
             -j "$JOBS" \
         || { warn "cppcheck reported issues."; return 1; }
+    else
+		# Collect files the same way as other tools
+		local -a files
+		mapfile -d '' files < <(collect_files "$root" '*.c' '*.h')
 
-    note "cppcheck: completed for ${#files[@]} files."
+		if ((${#files[@]} == 0)); then
+			warn "No .c/.h files found for cppcheck."
+			return 0
+		fi
+
+		# cppcheck quirks:
+		#   - unusedFunction incompatible with -j
+		#   - toomanyconfigs/checkersReport are info noise
+		printf '%s\0' "${files[@]}" | xargs -0 \
+			cppcheck \
+				--enable=warning,style,performance,portability \
+				--inconclusive \
+				--std=c11 \
+				--platform=unix64 \
+				--suppress=missingIncludeSystem \
+				--suppress=unmatchedSuppression \
+				--suppress=knownConditionTrueFalse \
+				--quiet \
+				--error-exitcode=1 \
+				-j "$JOBS" \
+			|| { warn "cppcheck reported issues."; return 1; }
+
+		note "cppcheck: completed for ${#files[@]} files."
+	fi
 }
 
 main() {

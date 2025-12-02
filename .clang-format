@@ -4,6 +4,7 @@
 
 BasedOnStyle: LLVM
 Language: Cpp  # clang-format uses Cpp for C as well
+InsertNewlineAtEOF: true
 
 # --- Indentation and width ---
 IndentWidth: 4
