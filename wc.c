@@ -1,13 +1,17 @@
 /*
- * wc.c - High-performance word frequency counter
- * Build: gcc -O3 -std=c11 -march=native -Wall -Wextra wc.c -o wc
- * Note:  Linux/POSIX specific (mmap, madvise)
+ * wc_elegant.c - Word frequency counter (elegant version of A)
+ *
+ * Build:
+ *   gcc -O2 -std=c11 -Wall -Wextra wc_elegant.c -o wc_elegant
+ *
+ * Usage:
+ *   ./wc_elegant <file>
  */
 
-#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
 #include <fcntl.h>
-#include <stdalign.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,22 +21,49 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-/* --- Tuning & Constants ------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* Constants and Basic Utilities                                             */
+/* ------------------------------------------------------------------------- */
 
-#define HASH_LOAD_FACTOR 0.75
-#define PAGE_SIZE 4096u
-#define ARENA_BLOCK_SIZE (1u << 22) /* 4MB chunks */
-#define FNV_OFFSET 0xcbf29ce484222325UL
-#define FNV_PRIME 0x100000001b3UL
+enum
+{
+    INITIAL_CAPACITY = 1024, /* must be power of two */
+    MAX_WORD = 256,
+    TOP_N = 10
+};
 
-#ifndef MAP_POPULATE
-#define MAP_POPULATE 0
-#endif
+_Static_assert((INITIAL_CAPACITY & (INITIAL_CAPACITY - 1)) == 0,
+               "INITIAL_CAPACITY must be a power of two");
 
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
+static const uint64_t FNV_OFFSET = 0xcbf29ce484222325ULL;
+static const uint64_t FNV_PRIME = 0x100000001b3ULL;
 
-/* --- Data Types --------------------------------------------------------- */
+static inline int is_letter_ascii(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+static inline unsigned char to_lower_ascii(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + ('a' - 'A')) : c;
+}
+
+static void die_errno(const char *msg)
+{
+    perror(msg);
+    exit(EXIT_FAILURE);
+}
+
+static void die_msg(const char *msg)
+{
+    (void)fputs(msg, stderr);
+    (void)fputc('\n', stderr);
+    exit(EXIT_FAILURE);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Hash Map of Word -> Count (Open Addressing)                               */
+/* ------------------------------------------------------------------------- */
 
 typedef struct
 {
@@ -41,99 +72,115 @@ typedef struct
     size_t count;
 } Entry;
 
-typedef struct Block
-{
-    struct Block *prev;
-    char *ptr;
-    char *end;
-    alignas(64) char data[];
-} Block;
-
-typedef struct
-{
-    Block *current;
-} Arena;
-
 typedef struct
 {
     Entry *slots;
-    size_t mask;
-    size_t count;
-    size_t threshold;
-    Arena *arena;
-} Map;
+    size_t capacity;  /* always a power of two */
+    size_t mask;      /* capacity - 1 */
+    size_t size;      /* number of occupied entries (unique words) */
+    size_t threshold; /* capacity * load_factor */
+    size_t total;     /* total words (including repeats) */
+} HashMap;
 
-/* --- Globals (Lookup Table) --------------------------------------------- */
-
-static uint8_t g_props[256]; /* 0 = non-alpha, >0 = lowercase char */
-
-static void init_lut(void)
+static size_t next_power_of_two(size_t n)
 {
-    memset(g_props, 0, sizeof(g_props));
-    for (int i = 0; i < 256; i++)
-    {
-        unsigned char c = (unsigned char)i;
-        if (c >= 'A' && c <= 'Z')
-            c = (uint8_t)(c + 32);
-        if (c >= 'a' && c <= 'z')
-            g_props[i] = c;
-    }
+    if (n < 2)
+        return 2;
+
+    n--;
+    for (size_t shift = 1; shift < sizeof(size_t) * 8; shift <<= 1)
+        n |= n >> shift;
+    return n + 1;
 }
 
-/* --- mmap Helper -------------------------------------------------------- */
-
-static void *xmap(size_t bytes)
+static int hash_map_init(HashMap *map, size_t initial_capacity)
 {
-    void *p = mmap(NULL,
-                   bytes,
-                   PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS,
-                   -1,
-                   0);
-    if (p == MAP_FAILED)
-    {
-        perror("mmap");
-        exit(EXIT_FAILURE);
-    }
-    return p;
+    if (!map)
+        return -1;
+
+    size_t cap = next_power_of_two(initial_capacity);
+    Entry *slots = calloc(cap, sizeof *slots);
+    if (!slots)
+        return -1;
+
+    map->slots = slots;
+    map->capacity = cap;
+    map->mask = cap - 1;
+    map->size = 0;
+    map->total = 0;
+
+    const double load_factor = 0.75;
+    map->threshold = (size_t)(cap * load_factor);
+
+    return 0;
 }
 
-/* --- Arena Allocator ---------------------------------------------------- */
-
-static void *arena_alloc(Arena *a, size_t size)
+static void hash_map_destroy(HashMap *map)
 {
-    size = (size + 7u) & ~7u; /* 8-byte alignment */
+    if (!map || !map->slots)
+        return;
 
-    Block *b = a->current;
-    if (unlikely(!b || b->ptr + size > b->end))
+    for (size_t i = 0; i < map->capacity; i++)
     {
-        size_t want = size + sizeof(Block);
-        size_t block_sz = want < ARENA_BLOCK_SIZE ? ARENA_BLOCK_SIZE : want;
-        block_sz = (block_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-
-        b = xmap(block_sz);
-        b->prev = a->current;
-        b->ptr = b->data;
-        b->end = (char *)b + block_sz;
-        a->current = b;
+        free(map->slots[i].word);
     }
-
-    void *ptr = b->ptr;
-    b->ptr += size;
-    return ptr;
+    free(map->slots);
+    map->slots = NULL;
+    map->capacity = 0;
+    map->mask = 0;
+    map->size = 0;
+    map->total = 0;
+    map->threshold = 0;
 }
 
-/* --- Hash Map (Open Addressing / Linear Probing) ------------------------ */
-
-static void map_resize(Map *map);
-
-static void map_upsert(Map *restrict map,
-                       uint64_t hash,
-                       const char *restrict str,
-                       size_t len)
+static int hash_map_resize(HashMap *map, size_t new_capacity)
 {
-    if (unlikely(map->count >= map->threshold))
-        map_resize(map);
+    size_t cap = next_power_of_two(new_capacity);
+    Entry *slots = calloc(cap, sizeof *slots);
+    if (!slots)
+        return -1;
+
+    size_t mask = cap - 1;
+
+    for (size_t i = 0; i < map->capacity; i++)
+    {
+        Entry old = map->slots[i];
+        if (!old.word)
+            continue;
+
+        size_t idx = old.hash & mask;
+        while (slots[idx].word)
+            idx = (idx + 1) & mask;
+        slots[idx] = old;
+    }
+
+    free(map->slots);
+    map->slots = slots;
+    map->capacity = cap;
+    map->mask = mask;
+
+    const double load_factor = 0.75;
+    map->threshold = (size_t)(cap * load_factor);
+
+    return 0;
+}
+
+static char *dup_word(const char *word, size_t len)
+{
+    char *s = malloc(len + 1);
+    if (!s)
+        return NULL;
+    memcpy(s, word, len);
+    s[len] = '\0';
+    return s;
+}
+
+static int
+hash_map_upsert(HashMap *map, const char *word, size_t len, uint64_t hash)
+{
+    if (map->size >= map->threshold)
+        if (hash_map_resize(map, map->capacity * 2) < 0)
+            return -1;
 
     size_t idx = hash & map->mask;
 
@@ -145,59 +192,77 @@ static void map_upsert(Map *restrict map,
         {
             e->hash = hash;
             e->count = 1;
-            e->word = arena_alloc(map->arena, len + 1);
-            memcpy(e->word, str, len);
-            e->word[len] = '\0';
-            map->count++;
-            return;
+            e->word = dup_word(word, len);
+            if (!e->word)
+                return -1;
+
+            map->size++;
+            map->total++;
+            return 0;
         }
 
-        if (e->hash == hash && strcmp(e->word, str) == 0)
+        if (e->hash == hash && strcmp(e->word, word) == 0)
         {
             e->count++;
-            return;
+            map->total++;
+            return 0;
         }
 
         idx = (idx + 1) & map->mask;
     }
 }
 
-static void map_resize(Map *map)
+/* ------------------------------------------------------------------------- */
+/* Word Scanning                                                             */
+/* ------------------------------------------------------------------------- */
+
+static int count_words(HashMap *map, const char *data, size_t length)
 {
-    size_t new_cap = map->slots ? (map->mask + 1) * 2 : 1024;
-    size_t bytes = new_cap * sizeof(Entry);
+    const char *p = data;
+    const char *end = data + length;
+    char buf[MAX_WORD];
 
-    Entry *new_slots = xmap(bytes);
-    memset(new_slots, 0, bytes);
-
-    size_t new_mask = new_cap - 1;
-
-    if (map->slots)
+    while (p < end)
     {
-        for (size_t i = 0; i <= map->mask; i++)
-        {
-            Entry *old = &map->slots[i];
-            if (!old->word)
-                continue;
+        /* Skip non-letters */
+        while (p < end && !is_letter_ascii((unsigned char)*p))
+            p++;
 
-            size_t idx = old->hash & new_mask;
-            while (new_slots[idx].word)
-            {
-                idx = (idx + 1) & new_mask;
-            }
-            new_slots[idx] = *old;
+        if (p >= end)
+            break;
+
+        char *out = buf;
+        uint64_t hash = FNV_OFFSET;
+
+        while (p < end && is_letter_ascii((unsigned char)*p))
+        {
+            unsigned char c = to_lower_ascii((unsigned char)*p);
+            if ((size_t)(out - buf) < MAX_WORD - 1)
+                *out++ = (char)c;
+
+            hash ^= c;
+            hash *= FNV_PRIME;
+            p++;
         }
-        munmap(map->slots, (map->mask + 1) * sizeof(Entry));
+
+        size_t len = (size_t)(out - buf);
+        if (len == 0)
+            continue;
+
+        buf[len] = '\0';
+
+        if (hash_map_upsert(map, buf, len, hash) < 0)
+            return -1;
     }
 
-    map->slots = new_slots;
-    map->mask = new_mask;
-    map->threshold = (size_t)(new_cap * HASH_LOAD_FACTOR);
+    return 0;
 }
 
-/* --- Sorting Comparator ------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* Sorting and Output                                                        */
+/* ------------------------------------------------------------------------- */
 
-static int cmp_desc(const void *a, const void *b)
+static int cmp_entry_desc(const void *a, const void *b)
 {
     const Entry *ea = a;
     const Entry *eb = b;
@@ -209,143 +274,141 @@ static int cmp_desc(const void *a, const void *b)
     return strcmp(ea->word, eb->word);
 }
 
-/* --- Core --------------------------------------------------------------- */
+static Entry *collect_entries(const HashMap *map, size_t *out_count)
+{
+    if (!map || !out_count)
+        return NULL;
+
+    if (map->size == 0)
+    {
+        *out_count = 0;
+        return NULL;
+    }
+
+    Entry *dense = malloc(map->size * sizeof *dense);
+    if (!dense)
+        return NULL;
+
+    size_t j = 0;
+    for (size_t i = 0; i < map->capacity; i++)
+    {
+        if (!map->slots[i].word)
+            continue;
+        dense[j++] = map->slots[i];
+    }
+
+    *out_count = j;
+    return dense;
+}
+
+static void print_results(const HashMap *map)
+{
+    if (!map || map->size == 0)
+    {
+        puts("No words found.");
+        return;
+    }
+
+    size_t n_entries = 0;
+    Entry *dense = collect_entries(map, &n_entries);
+    if (!dense)
+        die_msg("out of memory while collecting entries");
+
+    qsort(dense, n_entries, sizeof *dense, cmp_entry_desc);
+
+    printf("\n%7s %-16s %s\n", "Count", "Word", "%");
+    printf("------- ---------------- -----\n");
+
+    size_t limit = (n_entries < TOP_N) ? n_entries : TOP_N;
+    for (size_t i = 0; i < limit; i++)
+    {
+        const Entry *e = &dense[i];
+        double pct = (map->total == 0)
+                             ? 0.0
+                             : (100.0 * (double)e->count / (double)map->total);
+
+        printf("%7zu %-16s %.2f\n", e->count, e->word, pct);
+    }
+
+    printf("\nTotal: %zu words, %zu unique\n", map->total, map->size);
+
+    free(dense);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Main                                                                      */
+/* ------------------------------------------------------------------------- */
 
 int main(int argc, char **argv)
 {
     if (argc != 2)
     {
         (void)fprintf(stderr, "usage: %s <file>\n", argv[0]);
-        return 1;
+        return EXIT_FAILURE;
     }
 
-    init_lut();
-
-    /* 1. Map File */
-    int fd = open(argv[1], O_RDONLY);
-    if (fd < 0)
-    {
-        perror("open");
-        return 1;
-    }
+    const char *path = argv[1];
+    int fd = -1;
+    void *map_addr = MAP_FAILED;
+    size_t size = 0;
+    HashMap map = { 0 };
+    int rc = EXIT_FAILURE;
 
     struct stat st;
-    if (fstat(fd, &st) || !st.st_size)
+
+    if ((fd = open(path, O_RDONLY)) < 0)
     {
-        close(fd);
-        return 0;
+        perror("open");
+        goto out;
     }
 
-    int flags = MAP_PRIVATE | MAP_POPULATE;
-    char *data = mmap(NULL, (size_t)st.st_size, PROT_READ, flags, fd, 0);
-    if (data == MAP_FAILED)
+    if (fstat(fd, &st) < 0)
+    {
+        perror("fstat");
+        goto out;
+    }
+
+    if (st.st_size == 0)
+    {
+        puts("Empty file.");
+        rc = EXIT_SUCCESS;
+        goto out;
+    }
+
+    size = (size_t)st.st_size;
+
+    map_addr = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map_addr == MAP_FAILED)
     {
         perror("mmap");
+        goto out;
+    }
+
+    (void)posix_madvise(map_addr, size, POSIX_MADV_SEQUENTIAL);
+
+    if (hash_map_init(&map, INITIAL_CAPACITY) < 0)
+    {
+        (void)fputs("out of memory initializing hash map\n", stderr);
+        goto out;
+    }
+
+    if (count_words(&map, map_addr, size) < 0)
+    {
+        (void)fputs("out of memory while counting words\n", stderr);
+        goto out;
+    }
+
+    print_results(&map);
+    rc = EXIT_SUCCESS;
+
+out:
+    hash_map_destroy(&map);
+
+    if (map_addr != MAP_FAILED)
+        munmap(map_addr, size);
+
+    if (fd >= 0)
         close(fd);
-        return 1;
-    }
 
-    madvise(data, (size_t)st.st_size, MADV_SEQUENTIAL);
-
-    /* 2. Process */
-    Arena arena = (Arena){ 0 };
-    Map map = { .arena = &arena };
-
-    char *ptr = data;
-    char *end = data + st.st_size;
-    char buf[256];
-
-    while (ptr < end)
-    {
-        /* Skip non-alpha quickly */
-        while (ptr < end && !g_props[(uint8_t)*ptr])
-        {
-            ptr++;
-        }
-        if (ptr == end)
-            break;
-
-        char *out = buf;
-        uint64_t hash = FNV_OFFSET;
-
-        while (ptr < end)
-        {
-            uint8_t c = g_props[(uint8_t)*ptr];
-            if (!c)
-                break;
-
-            if (likely((size_t)(out - buf) < sizeof buf - 1))
-            {
-                *out++ = (char)c;
-            }
-            hash = (hash ^ c) * FNV_PRIME;
-            ptr++;
-        }
-
-        size_t len = (size_t)(out - buf);
-        *out = '\0';
-
-        if (len)
-            map_upsert(&map, hash, buf, len);
-    }
-
-    /* 3. Sort & Print */
-    Entry *dense = NULL;
-    size_t total_words = 0;
-
-    if (map.count)
-    {
-        dense = xmap(map.count * sizeof(Entry));
-
-        size_t j = 0;
-        for (size_t i = 0; i <= map.mask; i++)
-        {
-            if (!map.slots[i].word)
-                continue;
-            dense[j] = map.slots[i];
-            total_words += dense[j].count;
-            j++;
-        }
-
-        qsort(dense, map.count, sizeof(Entry), cmp_desc);
-
-        printf("\n%7s %-16s %s\n", "Count", "Word", "%");
-        printf("------- ---------------- -----\n");
-
-        size_t limit = map.count < 10 ? map.count : 10;
-        for (size_t i = 0; i < limit; i++)
-        {
-            printf("%7zu %-16s %.2f\n",
-                   dense[i].count,
-                   dense[i].word,
-                   (100.0 * dense[i].count) / (double)total_words);
-        }
-    }
-
-    printf("\nTotal: %zu words, %zu unique\n", total_words, map.count);
-
-    printf("\nTotal: %zu words, %zu unique\n", total_words, map.count);
-
-    /* Cleanup */
-    if (dense)
-    {
-        munmap(dense, map.count * sizeof(Entry));
-    }
-    if (map.slots)
-    {
-        munmap(map.slots, (map.mask + 1) * sizeof(Entry));
-    }
-
-    munmap(data, (size_t)st.st_size);
-    close(fd);
-
-    while (arena.current)
-    {
-        Block *prev = arena.current->prev;
-        size_t sz = (size_t)(arena.current->end - (char *)arena.current);
-        munmap(arena.current, sz);
-        arena.current = prev;
-    }
-
-    return 0;
+    return rc;
 }
