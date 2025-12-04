@@ -1,327 +1,351 @@
 /*
- * wc.c - Word frequency counter
- * Build: gcc -O2 -std=c11 wc.c -o wc
- * Usage: ./wc <filename>
+ * wc.c - High-performance word frequency counter
+ * Build: gcc -O3 -std=c11 -march=native -Wall -Wextra wc.c -o wc
+ * Note:  Linux/POSIX specific (mmap, madvise)
  */
 
-#define _POSIX_C_SOURCE 200809L
-
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <stdalign.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
-enum
-{
-    HASH_BITS = 14,
-    HASH_SIZE = 1u << HASH_BITS,
-    MAX_WORD = 64,
-    TOP_N = 10,
+/* --- Tuning & Constants ------------------------------------------------- */
 
-    /*
-     * Arena sizing: empirically, English text averages ~5 chars/word.
-     * With overhead (WordNode + alignment + pointer), budget ~16 bytes
-     * per word. file_size/8 approximates total words, so file_size/8 * 16
-     * = file_size * 2 would be safe. We use file_size/4 as a conservative
-     * middle ground, plus a page for small files.
-     */
-    ARENA_DIVISOR = 4,
-    ARENA_MIN = 4096,
-};
+#define HASH_LOAD_FACTOR 0.75
+#define PAGE_SIZE 4096u
+#define ARENA_BLOCK_SIZE (1u << 22) /* 4MB chunks */
+#define FNV_OFFSET 0xcbf29ce484222325UL
+#define FNV_PRIME 0x100000001b3UL
 
-_Static_assert((HASH_SIZE & (HASH_SIZE - 1)) == 0,
-               "HASH_SIZE must be power of 2");
+#ifndef MAP_POPULATE
+#define MAP_POPULATE 0
+#endif
 
-typedef struct WordNode WordNode;
-struct WordNode
-{
-    WordNode *next;
-    size_t count;
-    uint32_t hash;
-    char word[];
-};
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+
+/* --- Data Types --------------------------------------------------------- */
 
 typedef struct
 {
-    char *base;
-    size_t used, cap;
+    uint64_t hash;
+    char *word;
+    size_t count;
+} Entry;
+
+typedef struct Block
+{
+    struct Block *prev;
+    char *ptr;
+    char *end;
+    alignas(64) char data[];
+} Block;
+
+typedef struct
+{
+    Block *current;
 } Arena;
 
 typedef struct
 {
-    WordNode *buckets[HASH_SIZE];
-    Arena arena;
-    size_t total, unique;
-} WordTable;
-
-typedef struct
-{
-    const char *word;
+    Entry *slots;
+    size_t mask;
     size_t count;
-} WordCount;
+    size_t threshold;
+    Arena *arena;
+} Map;
 
-/* --- Arena -------------------------------------------------------------- */
+/* --- Globals (Lookup Table) --------------------------------------------- */
 
-static void *arena_alloc(Arena *a, size_t size, size_t align)
+static uint8_t g_props[256]; /* 0 = non-alpha, >0 = lowercase char */
+
+static void init_lut(void)
 {
-    size_t pad = (align - (a->used & (align - 1))) & (align - 1);
-    if (a->used + pad + size > a->cap)
-        return NULL;
-    void *p = a->base + a->used + pad;
-    a->used += pad + size;
+    memset(g_props, 0, sizeof(g_props));
+    for (int i = 0; i < 256; i++)
+    {
+        unsigned char c = (unsigned char)i;
+        if (c >= 'A' && c <= 'Z')
+            c = (uint8_t)(c + 32);
+        if (c >= 'a' && c <= 'z')
+            g_props[i] = c;
+    }
+}
+
+/* --- mmap Helper -------------------------------------------------------- */
+
+static void *xmap(size_t bytes)
+{
+    void *p = mmap(NULL,
+                   bytes,
+                   PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS,
+                   -1,
+                   0);
+    if (p == MAP_FAILED)
+    {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
     return p;
 }
 
-/* --- Hash table --------------------------------------------------------- */
+/* --- Arena Allocator ---------------------------------------------------- */
 
-#define FNV_OFFSET 2166136261u
-#define FNV_PRIME 16777619u
-
-static int word_table_init(WordTable *t, size_t arena_cap)
+static void *arena_alloc(Arena *a, size_t size)
 {
-    memset(t, 0, sizeof *t);
-    t->arena.base = mmap(NULL,
-                         arena_cap,
-                         PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS,
-                         -1,
-                         0);
-    if (t->arena.base == MAP_FAILED)
-        return -1;
-    t->arena.cap = arena_cap;
-    return 0;
-}
+    size = (size + 7u) & ~7u; /* 8-byte alignment */
 
-static void word_table_free(WordTable *t)
-{
-    if (t->arena.base && t->arena.base != MAP_FAILED)
-        munmap(t->arena.base, t->arena.cap);
-}
-
-static int word_table_add(WordTable *restrict t,
-                          const char *restrict word,
-                          size_t len,
-                          uint32_t hash)
-{
-    size_t idx = hash & (HASH_SIZE - 1);
-
-    for (WordNode *n = t->buckets[idx]; n; n = n->next)
+    Block *b = a->current;
+    if (unlikely(!b || b->ptr + size > b->end))
     {
-        if (n->hash == hash && memcmp(n->word, word, len) == 0)
+        size_t want = size + sizeof(Block);
+        size_t block_sz = want < ARENA_BLOCK_SIZE ? ARENA_BLOCK_SIZE : want;
+        block_sz = (block_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+        b = xmap(block_sz);
+        b->prev = a->current;
+        b->ptr = b->data;
+        b->end = (char *)b + block_sz;
+        a->current = b;
+    }
+
+    void *ptr = b->ptr;
+    b->ptr += size;
+    return ptr;
+}
+
+/* --- Hash Map (Open Addressing / Linear Probing) ------------------------ */
+
+static void map_resize(Map *map);
+
+static void map_upsert(Map *restrict map,
+                       uint64_t hash,
+                       const char *restrict str,
+                       size_t len)
+{
+    if (unlikely(map->count >= map->threshold))
+        map_resize(map);
+
+    size_t idx = hash & map->mask;
+
+    for (;;)
+    {
+        Entry *e = &map->slots[idx];
+
+        if (!e->word)
         {
-            n->count++;
-            t->total++;
-            return 0;
+            e->hash = hash;
+            e->count = 1;
+            e->word = arena_alloc(map->arena, len + 1);
+            memcpy(e->word, str, len);
+            e->word[len] = '\0';
+            map->count++;
+            return;
         }
+
+        if (e->hash == hash && strcmp(e->word, str) == 0)
+        {
+            e->count++;
+            return;
+        }
+
+        idx = (idx + 1) & map->mask;
+    }
+}
+
+static void map_resize(Map *map)
+{
+    size_t new_cap = map->slots ? (map->mask + 1) * 2 : 1024;
+    size_t bytes = new_cap * sizeof(Entry);
+
+    Entry *new_slots = xmap(bytes);
+    memset(new_slots, 0, bytes);
+
+    size_t new_mask = new_cap - 1;
+
+    if (map->slots)
+    {
+        for (size_t i = 0; i <= map->mask; i++)
+        {
+            Entry *old = &map->slots[i];
+            if (!old->word)
+                continue;
+
+            size_t idx = old->hash & new_mask;
+            while (new_slots[idx].word)
+            {
+                idx = (idx + 1) & new_mask;
+            }
+            new_slots[idx] = *old;
+        }
+        munmap(map->slots, (map->mask + 1) * sizeof(Entry));
     }
 
-    WordNode *n =
-            arena_alloc(&t->arena, sizeof *n + len + 1, _Alignof(WordNode));
-    if (!n)
+    map->slots = new_slots;
+    map->mask = new_mask;
+    map->threshold = (size_t)(new_cap * HASH_LOAD_FACTOR);
+}
+
+/* --- Sorting Comparator ------------------------------------------------- */
+
+static int cmp_desc(const void *a, const void *b)
+{
+    const Entry *ea = a;
+    const Entry *eb = b;
+
+    if (ea->count < eb->count)
+        return 1;
+    if (ea->count > eb->count)
         return -1;
-
-    memcpy(n->word, word, len);
-    n->word[len] = '\0';
-    n->hash = hash;
-    n->count = 1;
-    n->next = t->buckets[idx];
-    t->buckets[idx] = n;
-    t->total++;
-    t->unique++;
-    return 0;
+    return strcmp(ea->word, eb->word);
 }
 
-static int cmp_count_desc(const void *a, const void *b)
-{
-    const WordCount *wa = a, *wb = b;
-    if (wa->count != wb->count)
-        return wa->count < wb->count ? 1 : -1;
-    return strcmp(wa->word, wb->word);
-}
+/* --- Core --------------------------------------------------------------- */
 
-static WordCount *word_table_sorted(const WordTable *t)
-{
-    WordCount *arr = malloc(t->unique * sizeof *arr);
-    if (!arr)
-        return NULL;
-
-    size_t j = 0;
-    for (size_t i = 0; i < HASH_SIZE; i++)
-        for (WordNode *n = t->buckets[i]; n; n = n->next)
-            arr[j++] = (WordCount){ n->word, n->count };
-
-    qsort(arr, t->unique, sizeof *arr, cmp_count_desc);
-    return arr;
-}
-
-/* --- Tokenizer ---------------------------------------------------------- */
-
-static inline int is_letter(unsigned char c)
-{
-    return (c | 32u) - 'a' < 26u;
-}
-
-/*
- * Advances *cursor past non-letters, then extracts a word into buf
- * (lowercased), computing FNV-1a hash incrementally. Returns word
- * length, or 0 if no word found before end.
- */
-static size_t next_word(const char **cursor,
-                        const char *end,
-                        char *buf,
-                        size_t bufsz,
-                        uint32_t *out_hash)
-{
-    const unsigned char *s = (const unsigned char *)*cursor;
-    const unsigned char *e = (const unsigned char *)end;
-
-    while (s < e && !is_letter(*s))
-        s++;
-    if (s >= e)
-    {
-        *cursor = (const char *)s;
-        return 0;
-    }
-
-    uint32_t h = FNV_OFFSET;
-    size_t i = 0;
-
-    while (s < e && is_letter(*s))
-    {
-        unsigned char c = *s | 32u;
-        h = (h ^ c) * FNV_PRIME;
-        if (i + 1 < bufsz)
-            buf[i++] = c;
-        s++;
-    }
-
-    buf[i] = '\0';
-    *cursor = (const char *)s;
-    *out_hash = h;
-    return i;
-}
-
-static int process(WordTable *t, const char *data, size_t len)
-{
-    const char *p = data, *end = data + len;
-    char word[MAX_WORD];
-    uint32_t hash;
-    size_t wlen;
-
-    while ((wlen = next_word(&p, end, word, sizeof word, &hash)) > 0)
-        if (word_table_add(t, word, wlen, hash) < 0)
-            return -1;
-    return 0;
-}
-
-/* --- Output ------------------------------------------------------------- */
-
-static void
-print_results(const WordTable *t, const WordCount *words, size_t file_size)
-{
-    puts("\n=== Top 10 Most Frequent Words ===");
-    puts("  Rank  Word                 Count      %");
-    puts("  ----  ---------------  ---------  -----");
-
-    size_t n = t->unique < TOP_N ? t->unique : TOP_N;
-    for (size_t i = 0; i < n; i++)
-        printf("  %4zu  %-15s  %9zu  %5.2f\n",
-               i + 1,
-               words[i].word,
-               words[i].count,
-               100.0 * (double)words[i].count / (double)t->total);
-
-    puts("\n=== Statistics ===");
-    printf("File size:       %.2f MB\n", (double)file_size / (1024.0 * 1024.0));
-    printf("Total words:     %zu\n", t->total);
-    printf("Unique words:    %zu\n", t->unique);
-}
-
-/* --- Main --------------------------------------------------------------- */
-
-int main(int argc, char *argv[])
+int main(int argc, char **argv)
 {
     if (argc != 2)
     {
-        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
-        return EXIT_FAILURE;
+        (void)fprintf(stderr, "usage: %s <file>\n", argv[0]);
+        return 1;
     }
 
-    const char *path = argv[1];
-    int fd = -1, rc = EXIT_FAILURE;
-    void *map = MAP_FAILED;
-    size_t size = 0, arena_size = 0;
-    WordTable table = { 0 };
-    WordCount *sorted = NULL;
+    init_lut();
+
+    /* 1. Map File */
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0)
+    {
+        perror("open");
+        return 1;
+    }
+
     struct stat st;
-
-    if ((fd = open(path, O_RDONLY)) < 0)
-        goto err_open;
-    if (fstat(fd, &st) < 0)
-        goto err_stat;
-    if (st.st_size == 0)
+    if (fstat(fd, &st) || !st.st_size)
     {
-        fprintf(stderr, "%s: empty file\n", path);
-        goto out;
-    }
-
-    size = (size_t)st.st_size;
-
-    /* Hint sequential access pattern to kernel */
-    (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-
-    if ((map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
-        goto err_mmap;
-
-    /* Advise sequential read-through for the mapped region */
-    (void)posix_madvise(map, size, POSIX_MADV_SEQUENTIAL);
-
-    arena_size = size / ARENA_DIVISOR;
-    if (arena_size < ARENA_MIN)
-        arena_size = ARENA_MIN;
-
-    if (word_table_init(&table, arena_size) < 0)
-        goto err_mem;
-    if (process(&table, map, size) < 0)
-        goto err_mem;
-
-    if (table.unique == 0)
-    {
-        puts("No words found.");
-        rc = EXIT_SUCCESS;
-        goto out;
-    }
-
-    if (!(sorted = word_table_sorted(&table)))
-        goto err_mem;
-
-    print_results(&table, sorted, size);
-    rc = EXIT_SUCCESS;
-    goto out;
-
-err_open:
-    fprintf(stderr, "open %s: %s\n", path, strerror(errno));
-    goto out;
-err_stat:
-    fprintf(stderr, "stat %s: %s\n", path, strerror(errno));
-    goto out;
-err_mmap:
-    fprintf(stderr, "mmap %s: %s\n", path, strerror(errno));
-    goto out;
-err_mem:
-    fputs("out of memory\n", stderr);
-
-out:
-    free(sorted);
-    word_table_free(&table);
-    if (map != MAP_FAILED)
-        munmap(map, size);
-    if (fd >= 0)
         close(fd);
-    return rc;
+        return 0;
+    }
+
+    int flags = MAP_PRIVATE | MAP_POPULATE;
+    char *data = mmap(NULL, (size_t)st.st_size, PROT_READ, flags, fd, 0);
+    if (data == MAP_FAILED)
+    {
+        perror("mmap");
+        close(fd);
+        return 1;
+    }
+
+    madvise(data, (size_t)st.st_size, MADV_SEQUENTIAL);
+
+    /* 2. Process */
+    Arena arena = (Arena){ 0 };
+    Map map = { .arena = &arena };
+
+    char *ptr = data;
+    char *end = data + st.st_size;
+    char buf[256];
+
+    while (ptr < end)
+    {
+        /* Skip non-alpha quickly */
+        while (ptr < end && !g_props[(uint8_t)*ptr])
+        {
+            ptr++;
+        }
+        if (ptr == end)
+            break;
+
+        char *out = buf;
+        uint64_t hash = FNV_OFFSET;
+
+        while (ptr < end)
+        {
+            uint8_t c = g_props[(uint8_t)*ptr];
+            if (!c)
+                break;
+
+            if (likely((size_t)(out - buf) < sizeof buf - 1))
+            {
+                *out++ = (char)c;
+            }
+            hash = (hash ^ c) * FNV_PRIME;
+            ptr++;
+        }
+
+        size_t len = (size_t)(out - buf);
+        *out = '\0';
+
+        if (len)
+            map_upsert(&map, hash, buf, len);
+    }
+
+    /* 3. Sort & Print */
+    Entry *dense = NULL;
+    size_t total_words = 0;
+
+    if (map.count)
+    {
+        dense = xmap(map.count * sizeof(Entry));
+
+        size_t j = 0;
+        for (size_t i = 0; i <= map.mask; i++)
+        {
+            if (!map.slots[i].word)
+                continue;
+            dense[j] = map.slots[i];
+            total_words += dense[j].count;
+            j++;
+        }
+
+        qsort(dense, map.count, sizeof(Entry), cmp_desc);
+
+        printf("\n%7s %-16s %s\n", "Count", "Word", "%");
+        printf("------- ---------------- -----\n");
+
+        size_t limit = map.count < 10 ? map.count : 10;
+        for (size_t i = 0; i < limit; i++)
+        {
+            printf("%7zu %-16s %.2f\n",
+                   dense[i].count,
+                   dense[i].word,
+                   (100.0 * dense[i].count) / (double)total_words);
+        }
+    }
+
+    printf("\nTotal: %zu words, %zu unique\n", total_words, map.count);
+
+    printf("\nTotal: %zu words, %zu unique\n", total_words, map.count);
+
+    /* Cleanup */
+    if (dense)
+    {
+        munmap(dense, map.count * sizeof(Entry));
+    }
+    if (map.slots)
+    {
+        munmap(map.slots, (map.mask + 1) * sizeof(Entry));
+    }
+
+    munmap(data, (size_t)st.st_size);
+    close(fd);
+
+    while (arena.current)
+    {
+        Block *prev = arena.current->prev;
+        size_t sz = (size_t)(arena.current->end - (char *)arena.current);
+        munmap(arena.current, sz);
+        arena.current = prev;
+    }
+
+    return 0;
 }
