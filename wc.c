@@ -1,11 +1,11 @@
 /*
- * wc_elegant.c - Word frequency counter (elegant version of A)
+ * wc.c - Word frequency counter
  *
  * Build:
- *   gcc -O2 -std=c11 -Wall -Wextra wc_elegant.c -o wc_elegant
+ *   gcc -O2 -std=c11 -Wall -Wextra wc.c -o wc
  *
  * Usage:
- *   ./wc_elegant <file>
+ *   ./wc <file>
  */
 
 #define _POSIX_C_SOURCE 200809L
