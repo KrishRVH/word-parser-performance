@@ -1,295 +1,473 @@
-# wordcount – a small, idiomatic C99 word-frequency library
+# wordcount - Production C99 Word Frequency Library
 
-This project provides:
+A production-quality, embeddable C99 library for word frequency counting with optional memory limits, comprehensive error handling, and cross-platform support.
 
-- A reusable, C99 word-frequency library (`libwordcount.a`)
-- A minimal CLI tool (`wc`) that counts word frequencies from files/stdin
-- A unit test harness (`wc_test`) exercising the public API
+## Design Philosophy
 
-The code is intended both as production-quality utility code and as a
-didactic example of clean, portable C99:
+This library demonstrates expert-level C patterns distilled from Redis, SQLite, musl libc, and Linux kernel practices (see `research.md` for detailed rationale):
 
-- No global state
-- Opaque handle for the main data structure
-- Careful error handling with explicit status codes
-- Strict, well-documented ownership and lifetimes
-- Portable character handling via `<ctype.h>` following CERT STR34/STR37
+- **Arena allocation** - Single-reset cleanup, zero fragmentation
+- **Open addressing hash table** - Linear probing with power-of-2 sizing
+- **FNV-1a hashing** - Simple, effective, collision-resistant
+- **Overflow-safe arithmetic** - All size calculations checked
+- **Goto-cleanup error handling** - Canonical Linux kernel pattern
+- **Memory accounting** - Optional hard limits for embedded systems
 
-The public API is declared in `include/wordcount.h`. The implementation
-is in `src/wordcount.c`. The CLI and tests demonstrate correct usage.
+## Features
 
----
+- **Pure C99** - No dependencies beyond standard library
+- **Cross-platform** - Windows and POSIX via clean abstraction layer
+- **Memory-bounded** - Optional hard caps on internal allocations
+- **OOM-hardened** - Graceful failure even under memory pressure
+- **Embeddable** - Single header + single .c file
+- **Thread-safe** - Multiple instances can be used concurrently (no shared state)
+- **Comprehensive tests** - 60+ unit tests including SQLite-style OOM injection
 
-## Directory layout
+## Quick Start
 
-```text
-include/
-    wordcount.h     Public API header
+### Build
 
-src/
-    wordcount.c     Library implementation
-    wc_main.c       CLI driver (builds `wc`)
-
-tests/
-    wc_test.c       Unit tests for the library
-
-Makefile            Builds library, CLI, and tests
-README.md           This file
-```
-
-You can freely add:
-
-- `docs/` for extended documentation
-- `bin/`, `lib/`, `build/` – created by the Makefile
-- `LICENSE` if you want a separate license file
-
-The source files themselves declare their copyright / license
-(`Public domain / CC0` in the header’s documentation).
-
----
-
-## Building
-
-### Prerequisites
-
-Any reasonably modern C compiler with C99 support:
-
-- GCC 5+ on Linux/BSD/macOS
-- Clang/LLVM 3.8+ (including Apple Clang)
-- MinGW-w64 GCC (via MSYS2, Cygwin, or w64devkit) on Windows
-
-A POSIX-like shell environment is assumed for the Makefile (including
-on Windows, via:
-
-- MSYS2
-- Cygwin
-- WSL / WSL2
-- [w64devkit](https://github.com/skeeto/w64devkit))
-
-### Recommended compiler flags
-
-The Makefile enables, by default:
-
-- `-std=c99 -Wall -Wextra -Wpedantic`
-- For GCC/Clang additionally:
-  - `-Wshadow -Wconversion -Wcast-qual -Wwrite-strings`
-  - `-Wstrict-prototypes -Wmissing-prototypes -Wswitch-enum -Wvla`
-
-These follow long-standing recommendations from GCC documentation and
-the CERT C Coding Standard, and are intended to catch a wide range of
-defects in portable C code.
-
-You can override or extend `CFLAGS` on the command line:
-
-```sh
-make CFLAGS='-O0 -g -std=c99 -Wall -Wextra -Wpedantic'
-```
-
-### Build everything (library, CLI, tests)
-
-From the project root:
-
-```sh
+```bash
+# Library + CLI + tests
+mkdir -p build && cd build
+cmake ..
 make
-```
 
-This produces:
-
-- `lib/libwordcount.a`   – static library
-- `bin/wc`               – command-line tool
-- `bin/wc_test`          – unit test executable
-
-### Run tests
-
-```sh
+# Run tests
 make test
-# or: make check
+# or directly:
+./wc_test
+
+# Use the CLI
+./wc ../book.txt
+cat file.txt | ./wc
 ```
 
-The tests use `assert(3)`; any failure aborts the process and prints the
-failing assertion.
+### Integration
 
-### Clean
+Simply include `wordcount.h` and compile with `wordcount.c`:
 
-```sh
-make clean
+```bash
+gcc -std=c99 -O2 wordcount.c your_program.c -o program
 ```
 
-Removes `build/`, `bin/`, and `lib/`.
-
----
-
-## Using the library
-
-The public header is `include/wordcount.h`. At a high level:
-
-- `wc_table` is an opaque handle to a word-count hash table.
-- `wc_create` / `wc_destroy` manage the table’s lifetime.
-- `wc_add_word` inserts a pre-normalized word (no case folding).
-- `wc_process_text` tokenizes raw text using `isalpha()` and `tolower()`,
-  counting words case-insensitively.
-- `wc_snapshot` returns a sorted array of `(word, count)` pairs.
-- `wc_total_words` / `wc_unique_words` query aggregate counts.
-- `wc_version` exposes the library version string at runtime.
-
-### Example: linking against the library
-
-After building (`make`), you can link your own program against
-`libwordcount.a` like this:
-
-```sh
-cc -std=c99 -Iinclude -c my_program.c -o my_program.o
-cc my_program.o -Llib -lwordcount -o my_program
-```
-
-Inside `my_program.c`:
+### Basic Usage
 
 ```c
 #include "wordcount.h"
-#include <stdio.h>
 
 int main(void) {
-    const char *text = "The quick brown fox jumps over the lazy dog.";
+    wc *w = wc_open(0);  // 0 = default 64-byte max word length
+    if (!w) return 1;
 
-    wc_table *t = wc_create(NULL);
-    if (!t) {
-        /* handle out-of-memory */
-        return 1;
-    }
+    // Option 1: Add individual words (case-sensitive)
+    wc_add(w, "hello");
+    wc_add(w, "world");
 
-    wc_status st = wc_process_text(t, text, strlen(text));
-    if (st != WC_OK) {
-        /* handle error */
-        wc_destroy(t);
-        return 1;
-    }
+    // Option 2: Scan text (lowercases automatically)
+    const char *text = "Hello World! How's it going?";
+    wc_scan(w, text, strlen(text));
 
-    wc_entry *entries = NULL;
-    size_t    count   = 0;
-
-    st = wc_snapshot(t, &entries, &count);
-    if (st == WC_OK) {
-        for (size_t i = 0; i < count; ++i) {
-            printf("%zu %s\n", entries[i].count, entries[i].word);
+    // Get sorted results
+    wc_word *results;
+    size_t count;
+    if (wc_results(w, &results, &count) == WC_OK) {
+        for (size_t i = 0; i < count; i++) {
+            printf("%zu: %s\n", results[i].count, results[i].word);
         }
+        wc_results_free(results);
     }
 
-    wc_free_snapshot(entries);
-    wc_destroy(t);
-    return (st == WC_OK) ? 0 : 1;
+    printf("Total: %zu  Unique: %zu\n", wc_total(w), wc_unique(w));
+    wc_close(w);
+    return 0;
 }
 ```
 
----
+## API Reference
 
-## CLI usage
+### Lifecycle
 
-Once built, the `wc` binary provides a simple, portable word-frequency
-tool:
+```c
+wc *wc_open(size_t max_word);
+```
+Create word counter with default settings. `max_word`: max stored word length (0 = default 64, clamped to [4, 1024]). Returns NULL on allocation failure.
 
-```sh
-# From the project root after `make`
-bin/wc file1.txt file2.txt
+```c
+wc *wc_open_ex(size_t max_word, const wc_limits *limits);
+```
+Create with memory limits and tuning parameters. See `wc_limits` below.
 
-# Or read from stdin:
-cat file.txt | bin/wc
+```c
+void wc_close(wc *w);
+```
+Destroy word counter. NULL-safe.
+
+### Word Entry
+
+```c
+int wc_add(wc *w, const char *word);
+```
+Add single word (**case-sensitive**). Returns `WC_OK` (0), `WC_ERROR` (1), or `WC_NOMEM` (2).
+
+```c
+int wc_scan(wc *w, const char *text, size_t len);
+```
+Scan text for words (**lowercases automatically**). Only ASCII letters (A-Z, a-z) are recognized; all other bytes are separators.
+
+**Critical Difference:**
+- `wc_add("Hello")` and `wc_add("hello")` create **two distinct** entries
+- `wc_scan("Hello", 5)` stores as `"hello"` (normalized)
+
+### Queries
+
+```c
+size_t wc_total(const wc *w);
+size_t wc_unique(const wc *w);
+```
+Return total/unique word counts. NULL-safe (returns 0).
+
+```c
+int wc_results(const wc *w, wc_word **out, size_t *n);
+```
+Get sorted results (descending by count, then alphabetically). Caller must free via `wc_results_free()`.
+
+```c
+void wc_results_free(wc_word *results);
+```
+Free results array. NULL-safe.
+
+### Utilities
+
+```c
+const char *wc_errstr(int code);
+const char *wc_version(void);
+```
+Error code to string, version info.
+
+## Memory Management
+
+### Custom Allocators
+
+Override default malloc/free by defining macros before including the header:
+
+```c
+#define WC_MALLOC(n) my_malloc(n)
+#define WC_FREE(p)   my_free(p)
+#include "wordcount.h"
 ```
 
-Behavior:
+### Memory Limits
 
-- If one or more file names are given, each is opened (`"rb"`), read
-  fully into memory, and passed to `wc_process_text()`.
-- If no files are specified, stdin is read instead.
-- Word counts are printed to stdout in descending frequency, with
-  alphabetical order as a tiebreaker.
-- A summary (`Total words`, `Unique words`) is printed to stderr.
+For embedded systems or untrusted input, set hard memory caps:
 
----
+```c
+wc_limits lim = {
+    .max_bytes = 1048576,  // 1MB total budget
+    .init_cap = 512,       // Initial hash table size (optional)
+    .block_size = 4096     // Arena block size (optional)
+};
 
-## Tests
-
-`bin/wc_test` exercises:
-
-- Table creation/destruction and configuration options
-- Insertion via `wc_add_word` and via `wc_process_text`
-- Case-folding and tokenization semantics
-- Snapshot sorting and tie-breaking rules
-- Behavior on empty input and error conditions
-- Stress scenarios (many unique words, many duplicates, truncation,
-  large initial capacities)
-
-Run them via:
-
-```sh
-make test
-# or:
-bin/wc_test
+wc *w = wc_open_ex(64, &lim);
+// ... use normally, wc_add/wc_scan will return WC_NOMEM when budget exhausted
 ```
 
----
+**What counts against max_bytes:**
+- Hash table storage (grows dynamically)
+- Arena blocks (word storage)
+- Internal scan buffer (if `WC_STACK_BUFFER=0`)
 
-## Portability and locale / Unicode notes
+**What does NOT count:**
+- The `wc` handle itself
+- Results array returned by `wc_results()` (caller-owned)
 
-Character handling follows the CERT C rules STR34-C and STR37-C:
+### Environment Variable (CLI only)
 
-- All calls to `isalpha()` and `tolower()` receive arguments cast from
-  `unsigned char` (or `EOF`), avoiding undefined behavior for negative
-  `char` values.
-- The definition of a “word” is locale-dependent:
-  - A word is a maximal sequence for which `isalpha()` is non-zero.
-  - This depends on the active C locale (`setlocale()`).
+The CLI tool respects `WC_MAX_BYTES`:
 
-If you need predictable, ASCII-only behavior:
+```bash
+WC_MAX_BYTES=8388608 ./wc largefile.txt  # 8MB limit
+```
 
-- Ensure the `"C"` locale is active for the process before calling
-  into the library:
+## Word Detection Specification
 
-  ```c
-  #include <locale.h>
+This library uses **ASCII-letter-only** word detection:
 
-  setlocale(LC_CTYPE, "C");
-  ```
+- A **word** is a maximal run of ASCII letters (`A-Z`, `a-z`)
+- **All other bytes are separators**: digits, punctuation, UTF-8 sequences, etc.
+- Case normalization: `wc_scan()` lowercases via bitwise OR: `c | 32`
 
-Unicode:
+### Examples
 
-- The library does **not** attempt full Unicode or UTF-8 parsing.
-- Multi-byte sequences are treated byte-by-byte through `<ctype.h>`.
-- For Unicode-aware tokenization, consider doing higher-level parsing in
-  your application, then feeding normalized words to `wc_add_word()`.
+```c
+wc_scan(w, "it's", 4);        // 2 words: "it", "s"
+wc_scan(w, "foo-bar", 7);     // 2 words: "foo", "bar"
+wc_scan(w, "abc123def", 9);   // 2 words: "abc", "def"
+wc_scan(w, "café", 5);        // 1 word: "caf" (é is separator)
+```
 
----
+### Truncation
 
-## Thread-safety
+Words exceeding `max_word` are truncated **during hashing**:
 
-- Each `wc_table` instance is self-contained; there is no global state.
-- A single `wc_table` is **not** internally synchronized:
-  - Do not access the same table concurrently from multiple threads
-    without external synchronization.
-- Different `wc_table` instances may be used freely from different
-  threads.
+```c
+wc *w = wc_open(4);
+wc_add(w, "testing");   // Stored as "test"
+wc_add(w, "tested");    // Also "test" - count increments
+```
 
----
+**Important:** The entire input run is consumed, but only the first `max_word` bytes contribute to hash/storage. This prevents treating one long word as multiple words.
 
-## Non-goals and design choices
+## Architecture
 
-- **Not streaming-aware**: `wc_process_text()` operates on a contiguous
-  buffer; it does not track state across chunks. Streaming use cases
-  should handle boundary conditions above this layer.
-- **Not cryptographic**: FNV-1a is chosen for speed and distribution in
-  hash tables, not for security.
-- **Static library by default**: Shared-library build systems (e.g.
-  CMake) are intentionally omitted to keep this example focused and
-  self-contained. It is straightforward to wrap this library in CMake,
-  Meson, etc., if desired.
+### Hash Table
 
----
+- **Open addressing** with linear probing
+- **Power-of-2 sizing** for fast modulo via masking: `hash & (cap - 1)`
+- **Load factor 0.7** - table doubles when 70% full
+- **FNV-1a hash** - computed incrementally, resistant to collisions
+
+Implementation detail: Stored hash in each slot enables fast rejection on collision chain before doing expensive `memcmp()`.
+
+### Arena Allocator
+
+- **Linked list of blocks** - first block created on init, new blocks added as needed
+- **Zero fragmentation** - all words allocated from contiguous memory
+- **Automatic alignment** - portable alignment calculation without `uintptr_t`
+- **Single-reset cleanup** - `wc_close()` walks block list once
+
+This eliminates per-word allocation overhead and makes memory leaks structurally impossible.
+
+### Platform Abstraction (CLI)
+
+`wc_main.c` provides zero-copy file processing via memory mapping:
+
+**POSIX:**
+```c
+mmap(PROT_READ, MAP_PRIVATE) + madvise(MADV_SEQUENTIAL)
+```
+
+**Windows:**
+```c
+CreateFileMapping() + MapViewOfFile(FILE_MAP_READ)
+```
+
+Both paths share the same processing code via a unified `MappedFile` abstraction.
+
+### Error Handling
+
+The library follows the **goto-cleanup** pattern from Linux kernel style:
+
+```c
+int func(void) {
+    int rc = -1;
+    char *buf = NULL;
+
+    buf = malloc(1024);
+    if (!buf) goto cleanup;
+
+    // ... work
+    rc = 0;
+
+cleanup:
+    free(buf);
+    return rc;
+}
+```
+
+All pointers initialized to NULL, cleanup unconditional, single exit point.
+
+## Testing
+
+The test suite (`wc_test.c`) includes:
+
+### Functional Tests
+- Lifecycle: open/close, NULL safety, limits enforcement
+- wc_add: single/duplicate/multiple words, truncation, empty strings
+- wc_scan: case folding, punctuation, numbers, binary data (embedded NUL)
+- wc_results: sorting (count desc + alpha asc), empty results
+- Queries: NULL handling, version/error strings
+
+### Stress Tests
+- 100,000 duplicate insertions
+- 10,000 unique words
+- 50,000 words triggering multiple arena blocks
+- Table growth through multiple doublings
+
+### OOM Injection (glibc-specific)
+
+Compile with `-DWC_TEST_OOM` to enable SQLite-style torture testing:
+
+```bash
+gcc -O0 -g -DWC_TEST_OOM wordcount.c wc_test.c -o wc_test_oom
+./wc_test_oom
+```
+
+This interposes malloc/realloc to fail at specific call counts, verifying graceful degradation:
+
+```c
+// Test all allocation failure points
+test_oom_open();      // 10 injection points during wc_open
+test_oom_add();       // 20 injection points during wc_add
+test_oom_scan();      // 30 injection points during wc_scan
+test_oom_results();   // 10 injection points during wc_results
+test_oom_growth();    // OOM during table resize
+test_oom_torture();   // Exhaustive: tries 50 consecutive failure points
+```
+
+**Portability Note:** OOM harness uses glibc-specific `__libc_malloc`/`__libc_realloc`. For other platforms, compile with `-DWC_MALLOC=my_malloc -DWC_FREE=my_free` and implement interposition in your test wrapper.
+
+## Build Configuration
+
+### Compile-Time Options
+
+Define before including `wordcount.h`:
+
+```c
+// Custom allocator
+#define WC_MALLOC(n) arena_alloc(n)
+#define WC_FREE(p)   arena_free(p)
+
+// Use heap instead of stack for scan buffer (embedded systems)
+#define WC_STACK_BUFFER 0
+
+// Disable assertions (smaller code, less safety)
+#define WC_OMIT_ASSERT
+
+// Tune defaults for 16-bit systems
+#define WC_DEFAULT_INIT_CAP 128
+#define WC_DEFAULT_BLOCK_SZ 1024
+
+#include "wordcount.h"
+```
+
+### Platform Defaults
+
+Library automatically adapts to platform via `SIZE_MAX`:
+
+| Platform       | SIZE_MAX       | init_cap | block_size |
+|----------------|----------------|----------|------------|
+| 16-bit         | ≤ 65535        | 128      | 1KB        |
+| 32-bit         | ≤ 4294967295   | 1024     | 16KB       |
+| 64-bit         | > 4294967295   | 4096     | 64KB       |
+
+## Performance Characteristics
+
+| Operation       | Time Complexity | Notes                                      |
+|-----------------|-----------------|--------------------------------------------|
+| wc_add          | O(1) amortized  | Hash lookup + arena alloc                  |
+| wc_scan         | O(n)            | Single pass, hash computed incrementally   |
+| wc_total        | O(1)            | Counter maintained                         |
+| wc_unique       | O(1)            | Counter maintained                         |
+| wc_results      | O(n log n)      | qsort over unique words                    |
+
+**Memory:**
+- Hash table: O(unique words) * sizeof(Slot) ≈ 24 bytes/entry on 64-bit
+- Arena: O(total word bytes) + block overhead
+- Peak during wc_results: +O(unique words) * sizeof(wc_word) for sorted array
+
+## CLI Usage
+
+The `wc` binary processes files or stdin:
+
+```bash
+# Single file
+./wc book.txt
+
+# Multiple files (combined stats)
+./wc file1.txt file2.txt file3.txt
+
+# Stdin
+cat *.txt | ./wc
+
+# With memory limit
+WC_MAX_BYTES=1048576 ./wc largefile.txt
+```
+
+**Output Format:**
+
+```
+  Count  Word                  %
+-------  --------------------  ------
+   5432  the                   2.34
+   3210  and                   1.82
+    ...
+
+Total: 928012  Unique: 33782
+```
+
+Top 10 words to stdout, summary to stderr (enables separate redirection).
+
+## Files
+
+```
+library/
+├── wordcount.h          # Public API (277 lines)
+├── wordcount.c          # Core implementation (741 lines)
+├── wc_main.c           # CLI with mmap (543 lines)
+├── wc_test.c           # Test suite (957 lines)
+├── research.md         # Design philosophy and C patterns
+└── README.md           # This file
+```
+
+**Total:** ~2500 lines including comprehensive tests and documentation.
+
+## Design Patterns Demonstrated
+
+This library showcases C mastery patterns from leading codebases:
+
+1. **Opaque Handles** (Redis) - Public API uses `typedef struct wc wc;`, definition hidden
+2. **Arena Allocation** (SQLite) - Linked blocks with single-reset cleanup
+3. **Flexible Array Member** (musl) - `char buf[]` for inline storage
+4. **Compile-Time Assertions** - typedef array trick enforces platform assumptions
+5. **Goto-Cleanup** (Linux kernel) - Single exit point, NULL-safe cleanup
+6. **Overflow-Safe Arithmetic** - Explicit checks before all size calculations
+7. **Function Pointer Dispatch** - qsort comparator demonstrates data-centric design
+8. **Bit Manipulation** (musl) - Branchless ASCII checks: `((c | 32) - 'a') < 26`
+9. **Power-of-2 Sizing** (LuaJIT) - Hash table uses masking instead of modulo
+10. **Platform Abstraction** (libuv) - Clean separation via `#ifdef` blocks
+
+See `research.md` for detailed rationale and expert references (Rob Pike, antirez, Rich Felker, etc.).
+
+## Comparison to Benchmark Implementations
+
+This library serves as the **portable, embeddable foundation** for the benchmark suite:
+
+| Implementation         | Purpose                          | Lines | Dependencies        |
+|------------------------|----------------------------------|-------|---------------------|
+| `library/wordcount.c`  | Embeddable C99 library           | 741   | None (pure libc)    |
+| `wordcount.c`          | Parallel benchmark (mmap)        | ~500  | POSIX/Windows APIs  |
+| `wordcount_hyperopt.c` | AVX-512 SIMD + CRC32C           | ~800  | x86-64 intrinsics   |
+
+**Use the library when you need:**
+- Portable code (embedded, WASM, unusual platforms)
+- Memory limits (untrusted input, resource constraints)
+- API integration (not just file processing)
+- Comprehensive testing and OOM hardening
+
+**Use the benchmarks when you need:**
+- Maximum throughput on x86-64 (hyperopt)
+- Memory-mapped parallel processing (wordcount.c)
 
 ## License
 
-The header and source files declare:
+Public domain. See individual file headers.
 
-> Public domain / CC0
+## Contributing
 
-You may use, modify, and redistribute this code without restriction.
-If you package this as a standalone project, you may wish to add a
-separate `LICENSE` file mirroring that statement.
+This library prioritizes **simplicity over features**. Before proposing changes:
+
+1. Does it maintain C99 compatibility?
+2. Does it avoid new dependencies?
+3. Does it preserve the single-header + single-implementation model?
+4. Can it be tested via the existing harness?
+
+Performance optimizations welcome if they don't compromise portability or clarity.
+
+## References
+
+- **research.md** - Design philosophy, expert sources, C mastery patterns
+- **CMakeLists.txt** - Build configuration with strict warnings
+- **wc_test.c** - Comprehensive test coverage including OOM injection
+
+For questions about the word detection specification, see the main benchmark README.
