@@ -17,12 +17,61 @@
 **
 **   Memory allocation is routed through WC_MALLOC/WC_FREE macros
 **   to allow embedding applications to redirect to custom allocators.
+**
+** PORTABILITY
+**
+**   Uses only C99-guaranteed types. The hash uses unsigned long long
+**   (guaranteed 64+ bits) rather than optional uint64_t. Alignment
+**   calculations use a portable method that doesn't require uintptr_t.
+**
+**   Assumes ASCII-compatible character encoding for letter detection.
+**   Verified at compile time along with other platform requirements.
 */
 
-#include <stdlib.h> /* for default WC_MALLOC if not overridden */
 #include "wordcount.h"
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
+
+/*
+** Assertion configuration. Define WC_OMIT_ASSERT to disable.
+** In debug builds, assertions catch internal invariant violations.
+*/
+#ifndef WC_OMIT_ASSERT
+#include <assert.h>
+#define WC_ASSERT(x) assert(x)
+#else
+#define WC_ASSERT(x) ((void)0)
+#endif
+
+/*
+** Compile-time verification of platform requirements.
+**
+** 1. ASCII-compatible character set: Letters must have expected values
+**    and the uppercase/lowercase bit difference must be 0x20.
+**
+** 2. 8-bit bytes: CHAR_BIT must be 8. This catches DSPs and other
+**    exotic platforms where chars are 16 or 32 bits.
+**
+** 3. Pointer size is power of two: Required for efficient alignment.
+**    True on all known architectures.
+**
+** These checks cause a compile-time error on non-conforming platforms
+** rather than silent misbehavior at runtime.
+*/
+typedef char wc_check_ascii[('A' == 65 && 'Z' == 90 && 'a' == 97 &&
+                             'z' == 122 && ('a' ^ 'A') == 32)
+                                    ? 1
+                                    : -1];
+typedef char wc_check_char_bit[(CHAR_BIT == 8) ? 1 : -1];
+typedef char wc_check_ptr_align[((sizeof(void *) & (sizeof(void *) - 1)) == 0)
+                                        ? 1
+                                        : -1];
+
+/* Suppress unused typedef warnings */
+typedef wc_check_ascii wc_used_1;
+typedef wc_check_char_bit wc_used_2;
+typedef wc_check_ptr_align wc_used_3;
 
 /* --- Configuration --- */
 
@@ -32,9 +81,18 @@
 #define MIN_WORD 4
 #define DEF_WORD 64
 
-/* FNV-1a 64-bit constants */
+/*
+** FNV-1a constants. Using unsigned long long which C99 guarantees
+** is at least 64 bits, avoiding dependency on optional uint64_t.
+*/
 #define FNV_OFF 14695981039346656037ULL
 #define FNV_MUL 1099511628211ULL
+
+/*
+** Portable alignment constant. sizeof(void*) works on all hosted
+** implementations and is always a power of two in practice.
+*/
+#define WC_ALIGN sizeof(void *)
 
 /* --- Overflow-safe arithmetic --- */
 
@@ -85,13 +143,17 @@ static Block *block_new(size_t cap)
 
 static int arena_init(Arena *a)
 {
+    WC_ASSERT(a != NULL);
     a->head = a->tail = block_new(BLOCK_SZ);
     return a->head ? 0 : -1;
 }
 
 static void arena_free(Arena *a)
 {
-    Block *b = a->head;
+    Block *b;
+
+    WC_ASSERT(a != NULL);
+    b = a->head;
     while (b)
     {
         Block *n = b->next;
@@ -101,9 +163,19 @@ static void arena_free(Arena *a)
     a->head = a->tail = NULL;
 }
 
+/*
+** Portable alignment calculation without uintptr_t.
+**
+** Rather than casting pointers to integers (which requires the
+** optional uintptr_t type), we compute padding by examining the
+** offset from the block start. Since block->buf is allocated via
+** malloc, it's suitably aligned for any type. We track position
+** as an offset from buf and align that offset.
+*/
 static void *arena_alloc(Arena *a, size_t sz)
 {
-    size_t align = sizeof(void *);
+    size_t offset;
+    size_t align = WC_ALIGN;
     size_t pad;
     size_t avail;
     size_t cap;
@@ -111,22 +183,18 @@ static void *arena_alloc(Arena *a, size_t sz)
     char *p;
     Block *b;
 
-    /*
-    ** Defensive: verify alignment is power of two. This is true on
-    ** all practical platforms, but we degrade gracefully if not.
-    */
-    /* cppcheck-suppress knownConditionTrueFalse */
-    if ((align & (align - 1)) != 0)
-    {
-        align = 1;
-    }
+    WC_ASSERT(a != NULL);
+    WC_ASSERT(a->tail != NULL);
+    WC_ASSERT(a->tail->cur >= a->tail->buf);
+    WC_ASSERT(a->tail->cur <= a->tail->end);
 
     /*
-    ** Compute padding needed for alignment. Use uintptr_t (not size_t)
-    ** for pointer-to-integer cast per C99 7.18.1.4 - size_t is not
-    ** guaranteed to hold a pointer on segmented architectures.
+    ** Compute current offset from block start, then padding needed.
+    ** This works because (offset % align) gives misalignment, and
+    ** (align - misalignment) % align gives required padding.
     */
-    pad = ((uintptr_t) - (uintptr_t)a->tail->cur) & (align - 1);
+    offset = (size_t)(a->tail->cur - a->tail->buf);
+    pad = (align - (offset % align)) % align;
 
     /* Check available space (safe: cur <= end always) */
     avail = (size_t)(a->tail->end - a->tail->cur);
@@ -134,6 +202,7 @@ static void *arena_alloc(Arena *a, size_t sz)
     {
         p = a->tail->cur + pad;
         a->tail->cur = p + sz;
+        WC_ASSERT(a->tail->cur <= a->tail->end);
         return memset(p, 0, sz);
     }
 
@@ -149,17 +218,24 @@ static void *arena_alloc(Arena *a, size_t sz)
     a->tail->next = b;
     a->tail = b;
 
-    pad = ((uintptr_t) - (uintptr_t)b->cur) & (align - 1);
+    /*
+    ** Fresh block from malloc is already aligned, but we still
+    ** compute padding for consistency and future-proofing.
+    */
+    offset = 0;
+    pad = (align - (offset % align)) % align;
     p = b->cur + pad;
     b->cur = p + sz;
+    WC_ASSERT(b->cur <= b->end);
     return memset(p, 0, sz);
 }
+
 /* --- Hash table --- */
 
 typedef struct
 {
     char *word;
-    uint64_t hash;
+    unsigned long long hash;
     size_t cnt;
 } Slot;
 
@@ -171,11 +247,14 @@ struct wc
     size_t tot;
     size_t maxw;
     Arena arena;
+#if !WC_STACK_BUFFER
+    char *scanbuf;
+#endif
 };
 
-static uint64_t fnv(const char *s, size_t n)
+static unsigned long long fnv(const char *s, size_t n)
 {
-    uint64_t h = FNV_OFF;
+    unsigned long long h = FNV_OFF;
     size_t i;
     for (i = 0; i < n; i++)
     {
@@ -192,6 +271,10 @@ static int tab_grow(wc *w)
     size_t idx;
     size_t alloc;
     Slot *ns;
+
+    WC_ASSERT(w != NULL);
+    WC_ASSERT(w->tab != NULL);
+    WC_ASSERT(w->cap > 0);
 
     if (mul_overflows(w->cap, 2))
         return -1;
@@ -223,10 +306,19 @@ static int tab_grow(wc *w)
     return 0;
 }
 
-static Slot *tab_find(const wc *w, const char *word, size_t n, uint64_t h)
+static Slot *
+tab_find(const wc *w, const char *word, size_t n, unsigned long long h)
 {
-    size_t idx = (size_t)(h & (w->cap - 1));
-    size_t start = idx;
+    size_t idx;
+    size_t start;
+
+    WC_ASSERT(w != NULL);
+    WC_ASSERT(w->tab != NULL);
+    WC_ASSERT(w->cap > 0);
+    WC_ASSERT(word != NULL || n == 0);
+
+    idx = (size_t)(h & (w->cap - 1));
+    start = idx;
 
     do
     {
@@ -241,11 +333,15 @@ static Slot *tab_find(const wc *w, const char *word, size_t n, uint64_t h)
     return NULL;
 }
 
-static int tab_insert(wc *w, const char *word, size_t n, uint64_t h)
+static int tab_insert(wc *w, const char *word, size_t n, unsigned long long h)
 {
     Slot *s;
     char *copy;
     size_t alloc;
+
+    WC_ASSERT(w != NULL);
+    WC_ASSERT(word != NULL);
+    WC_ASSERT(n > 0);
 
     if (w->len * 10 >= w->cap * 7)
     {
@@ -324,6 +420,17 @@ wc *wc_open(size_t max_word)
         return NULL;
     }
 
+#if !WC_STACK_BUFFER
+    w->scanbuf = WC_MALLOC(max_word);
+    if (!w->scanbuf)
+    {
+        arena_free(&w->arena);
+        WC_FREE(w->tab);
+        WC_FREE(w);
+        return NULL;
+    }
+#endif
+
     return w;
 }
 
@@ -331,15 +438,18 @@ void wc_close(wc *w)
 {
     if (!w)
         return;
+#if !WC_STACK_BUFFER
+    WC_FREE(w->scanbuf);
+#endif
     arena_free(&w->arena);
     WC_FREE(w->tab);
     WC_FREE(w);
 }
 
-int wc_add(wc *w, const char *word)
+int wc_add(wc *restrict w, const char *restrict word)
 {
     size_t n;
-    uint64_t h;
+    unsigned long long h;
 
     if (!w || !word)
         return WC_ERROR;
@@ -355,18 +465,23 @@ int wc_add(wc *w, const char *word)
 
 /*
 ** ASCII-only letter check. Non-ASCII bytes (including UTF-8) are
-** treated as word separators.
+** treated as word separators. The bit-twiddling works because in
+** ASCII, lowercase letters differ from uppercase by exactly bit 5.
 */
 static int isalpha_(int c)
 {
     return ((unsigned)c | 32) - 'a' < 26;
 }
 
-int wc_scan(wc *w, const char *text, size_t len)
+int wc_scan(wc *restrict w, const char *restrict text, size_t len)
 {
     const unsigned char *p;
     const unsigned char *end;
+#if WC_STACK_BUFFER
     char buf[MAX_WORD];
+#else
+    char *buf;
+#endif
 
     if (!w)
         return WC_ERROR;
@@ -375,13 +490,18 @@ int wc_scan(wc *w, const char *text, size_t len)
     if (!text)
         return WC_ERROR;
 
+#if !WC_STACK_BUFFER
+    buf = w->scanbuf;
+    WC_ASSERT(buf != NULL);
+#endif
+
     p = (const unsigned char *)text;
     end = p + len;
 
     while (p < end)
     {
         size_t n;
-        uint64_t h;
+        unsigned long long h;
 
         while (p < end && !isalpha_(*p))
             p++;
@@ -401,6 +521,8 @@ int wc_scan(wc *w, const char *text, size_t len)
             }
         }
 
+        WC_ASSERT(n > 0);
+        WC_ASSERT(n <= w->maxw);
         if (tab_insert(w, buf, n, h) < 0)
             return WC_NOMEM;
     }
@@ -412,6 +534,7 @@ size_t wc_total(const wc *w)
 {
     return w ? w->tot : 0;
 }
+
 size_t wc_unique(const wc *w)
 {
     return w ? w->len : 0;
@@ -426,7 +549,7 @@ static int cmp(const void *a, const void *b)
     return strcmp(x->word, y->word);
 }
 
-int wc_results(const wc *w, wc_word **out, size_t *n)
+int wc_results(const wc *restrict w, wc_word **restrict out, size_t *restrict n)
 {
     wc_word *arr;
     size_t i;
@@ -472,6 +595,7 @@ int wc_results(const wc *w, wc_word **out, size_t *n)
             j++;
         }
     }
+    WC_ASSERT(j == w->len);
 
     qsort(arr, w->len, sizeof *arr, cmp);
     *out = arr;
@@ -482,6 +606,21 @@ int wc_results(const wc *w, wc_word **out, size_t *n)
 void wc_results_free(wc_word *r)
 {
     WC_FREE(r);
+}
+
+const char *wc_errstr(int rc)
+{
+    switch (rc)
+    {
+        case WC_OK:
+            return "success";
+        case WC_ERROR:
+            return "invalid argument or corrupted state";
+        case WC_NOMEM:
+            return "memory allocation failed";
+        default:
+            return "unknown error";
+    }
 }
 
 const char *wc_version(void)

@@ -20,7 +20,6 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define TOPN 10
@@ -52,8 +51,7 @@ typedef struct
 } MappedFile;
 
 /*
-** Map Win32 error to errno. Uses _dosmaperr if available (MSVC/UCRT),
-** otherwise falls back to EIO.
+** Map Win32 error to errno. Uses common mappings for portability.
 */
 static void set_errno_from_win32(void)
 {
@@ -329,12 +327,12 @@ process_mapped(wc *w, const char *data, size_t size, const char *name)
     rc = wc_scan(w, data, size);
     if (rc == WC_NOMEM)
     {
-        (void)fprintf(stderr, "wc: %s: out of memory\n", name);
+        (void)fprintf(stderr, "wc: %s: %s\n", name, wc_errstr(rc));
         return -1;
     }
     if (rc != WC_OK)
     {
-        (void)fprintf(stderr, "wc: %s: scan error\n", name);
+        (void)fprintf(stderr, "wc: %s: %s\n", name, wc_errstr(rc));
         return -1;
     }
 
@@ -418,12 +416,12 @@ static void output(const wc *w)
     rc = wc_results(w, &words, &len);
     if (rc == WC_NOMEM)
     {
-        (void)fprintf(stderr, "wc: out of memory\n");
+        (void)fprintf(stderr, "wc: %s\n", wc_errstr(rc));
         goto cleanup;
     }
     if (rc != WC_OK)
     {
-        (void)fprintf(stderr, "wc: error retrieving results\n");
+        (void)fprintf(stderr, "wc: %s\n", wc_errstr(rc));
         goto cleanup;
     }
 
@@ -462,7 +460,7 @@ int main(int argc, char **argv)
     w = wc_open(0);
     if (!w)
     {
-        (void)fprintf(stderr, "wc: out of memory\n");
+        (void)fprintf(stderr, "wc: %s\n", wc_errstr(WC_NOMEM));
         goto cleanup;
     }
 

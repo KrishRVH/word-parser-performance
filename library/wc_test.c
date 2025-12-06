@@ -32,7 +32,6 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 static int g_run, g_pass, g_fail;
@@ -51,12 +50,14 @@ static int g_run, g_pass, g_fail;
         g_pass++;         \
         printf("[OK]\n"); \
     } while (0)
+
 #define FAIL(m)                   \
     do                            \
     {                             \
         g_fail++;                 \
         printf("[FAIL] %s\n", m); \
     } while (0)
+
 #define ASSERT(c)     \
     do                \
     {                 \
@@ -555,6 +556,22 @@ static int test_version(void)
     return 0;
 }
 
+static int test_errstr(void)
+{
+    const char *s;
+    TEST("errstr");
+    s = wc_errstr(WC_OK);
+    ASSERT(s && strlen(s) > 0);
+    s = wc_errstr(WC_ERROR);
+    ASSERT(s && strlen(s) > 0);
+    s = wc_errstr(WC_NOMEM);
+    ASSERT(s && strlen(s) > 0);
+    s = wc_errstr(9999);
+    ASSERT(s && strlen(s) > 0);
+    PASS();
+    return 0;
+}
+
 /* ================================================================
 ** STRESS TESTS
 ** ================================================================ */
@@ -847,6 +864,7 @@ int main(void)
     printf("\nQueries:\n");
     test_query_null();
     test_version();
+    test_errstr();
 
     printf("\nStress:\n");
     test_many_unique();

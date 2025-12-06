@@ -15,6 +15,9 @@
 **   for bad arguments or corrupt state, WC_NOMEM (2) for allocation
 **   failure. Query functions (wc_total, wc_unique) return 0 on NULL.
 **
+**   Use wc_errstr() to get a human-readable description of any error
+**   code. The returned string is static and must not be freed.
+**
 ** CASE HANDLING
 **
 **   wc_add()  - case-sensitive: "Hello" and "hello" are distinct
@@ -24,7 +27,8 @@
 **
 **   Only ASCII letters (A-Z, a-z) are recognized as word characters.
 **   All other bytes (including UTF-8 multibyte sequences) are treated
-**   as word separators.
+**   as word separators. This library assumes an ASCII-compatible
+**   execution character set (true for ASCII, UTF-8, ISO-8859-*).
 **
 ** WORD LENGTH
 **
@@ -40,26 +44,47 @@
 **
 **   WC_REALLOC may also be defined for client code; the core library
 **   currently uses only WC_MALLOC and WC_FREE internally.
+**
+** BUILD CONFIGURATION
+**
+**   WC_OMIT_ASSERT  - Define to disable internal assertions (smaller
+**                     code, but less safety checking in debug builds).
+**
+**   WC_STACK_BUFFER - Define as 0 to heap-allocate scan buffers
+**                     instead of using stack. Useful for constrained
+**                     stack environments. Default is 1 (use stack).
+**
+** PORTABILITY
+**
+**   Requires C99. Uses only types guaranteed by C99 (no optional
+**   exact-width types). Works on any hosted implementation with
+**   8-bit chars and ASCII-compatible character encoding.
 */
 #ifndef WORDCOUNT_H
 #define WORDCOUNT_H
+
 #include <stddef.h>
+#include <stdlib.h>
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
+
 /*
 ** Version information. The version number is encoded as:
 **   (MAJOR * 1000000) + (MINOR * 1000) + PATCH
 */
-#define WC_VERSION "3.4.0"
-#define WC_VERSION_NUMBER 3004000
+#define WC_VERSION "4.1.0"
+#define WC_VERSION_NUMBER 4001000
+
 /*
 ** Result codes for int-returning functions.
 */
 #define WC_OK 0    /* Success */
 #define WC_ERROR 1 /* Generic error (bad args, corrupt state) */
 #define WC_NOMEM 2 /* Memory allocation failed */
+
 /*
 ** Memory allocator configuration. Define these before including
 ** wordcount.h to use a custom allocator.
@@ -73,10 +98,19 @@ extern "C"
 #ifndef WC_FREE
 #define WC_FREE(p) free(p)
 #endif
+
+/*
+** Stack buffer configuration. Set to 0 for heap allocation.
+*/
+#ifndef WC_STACK_BUFFER
+#define WC_STACK_BUFFER 1
+#endif
+
 /*
 ** Opaque word counter handle.
 */
 typedef struct wc wc;
+
 /*
 ** Result entry returned by wc_results().
 */
@@ -85,6 +119,7 @@ typedef struct wc_word
     const char *word;
     size_t count;
 } wc_word;
+
 /*
 ** Create a new word counter.
 **
@@ -94,29 +129,35 @@ typedef struct wc_word
 ** Returns NULL on allocation failure.
 */
 wc *wc_open(size_t max_word);
+
 /*
 ** Destroy a word counter. NULL-safe.
 */
 void wc_close(wc *w);
+
 /*
 ** Add a single word (case-sensitive, truncates at max_word).
 ** Empty strings are ignored. Returns WC_OK, WC_ERROR, or WC_NOMEM.
 */
-int wc_add(wc *w, const char *word);
+int wc_add(wc *restrict w, const char *restrict word);
+
 /*
 ** Scan text for words (lowercases, truncates at max_word).
 ** Non-alphabetic characters are word separators.
 ** Returns WC_OK, WC_ERROR, or WC_NOMEM.
 */
-int wc_scan(wc *w, const char *text, size_t len);
+int wc_scan(wc *restrict w, const char *restrict text, size_t len);
+
 /*
 ** Query total word count. Returns 0 if w is NULL.
 */
 size_t wc_total(const wc *w);
+
 /*
 ** Query unique word count. Returns 0 if w is NULL.
 */
 size_t wc_unique(const wc *w);
+
 /*
 ** Get sorted results (by count desc, then alphabetically).
 **
@@ -126,16 +167,28 @@ size_t wc_unique(const wc *w);
 ** Returns WC_OK, WC_ERROR (bad args), or WC_NOMEM.
 ** On empty results, *out=NULL and *n=0 with WC_OK return.
 */
-int wc_results(const wc *w, wc_word **out, size_t *n);
+int wc_results(const wc *restrict w,
+               wc_word **restrict out,
+               size_t *restrict n);
+
 /*
 ** Free results array. NULL-safe.
 */
 void wc_results_free(wc_word *r);
+
+/*
+** Return human-readable error description.
+** The returned string is static and must not be freed.
+*/
+const char *wc_errstr(int rc);
+
 /*
 ** Return version string.
 */
 const char *wc_version(void);
+
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* WORDCOUNT_H */
