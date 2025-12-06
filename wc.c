@@ -24,15 +24,13 @@
 #define MUL 0x100000001b3ULL
 
 typedef struct E E;
-struct E
-{
+struct E {
     E *next;
     size_t cnt, h;
     char w[];
 };
 
-static struct
-{
+static struct {
     E **tab;
     size_t cap, n, tot;
     char *mem;
@@ -62,11 +60,9 @@ static void grow(void)
     if (!newtab)
         die("out of memory");
 
-    for (size_t i = 0; i < G.cap; i++)
-    {
+    for (size_t i = 0; i < G.cap; i++) {
         E *e = G.tab[i];
-        while (e)
-        {
+        while (e) {
             E *next = e->next;
             size_t idx = e->h & (newcap - 1);
             e->next = newtab[idx];
@@ -85,10 +81,8 @@ static void add(const char *w, size_t len, size_t h)
         grow();
 
     size_t idx = h & (G.cap - 1);
-    for (E *e = G.tab[idx]; e; e = e->next)
-    {
-        if (e->h == h && !memcmp(e->w, w, len) && !e->w[len])
-        {
+    for (E *e = G.tab[idx]; e; e = e->next) {
+        if (e->h == h && !memcmp(e->w, w, len) && !e->w[len]) {
             e->cnt++;
             G.tot++;
             return;
@@ -116,8 +110,7 @@ static void scan(void)
     const unsigned char *end = s + G.len;
     char buf[256];
 
-    while (s < end)
-    {
+    while (s < end) {
         while (s < end && !alpha(*s))
             s++;
         if (s >= end)
@@ -125,8 +118,7 @@ static void scan(void)
 
         size_t h = SEED;
         size_t n = 0;
-        while (s < end && alpha(*s))
-        {
+        while (s < end && alpha(*s)) {
             unsigned c = *s++ | 32;
             if (n < sizeof(buf) - 1)
                 buf[n++] = c;
@@ -163,8 +155,7 @@ static void output(void)
     size_t top = G.n < 10 ? G.n : 10;
     printf("\n%7s  %-20s  %s\n", "count", "word", "%%");
     printf("-------  --------------------  ------\n");
-    for (size_t i = 0; i < top; i++)
-    {
+    for (size_t i = 0; i < top; i++) {
         E *e = arr[i];
         printf("%7zu  %-20s  %5.2f\n", e->cnt, e->w, 100.0 * e->cnt / G.tot);
     }
@@ -176,8 +167,7 @@ static void output(void)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2)
-    {
+    if (argc != 2) {
         (void)fprintf(stderr, "usage: %s <file>\n", argv[0]);
         return 1;
     }
@@ -189,8 +179,7 @@ int main(int argc, char **argv)
     struct stat st;
     if (fstat(G.fd, &st) < 0)
         die("cannot stat file");
-    if (st.st_size == 0)
-    {
+    if (st.st_size == 0) {
         puts("empty file");
         return 0;
     }

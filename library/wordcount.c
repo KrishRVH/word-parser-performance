@@ -66,16 +66,14 @@ static int mul_overflows(size_t a, size_t b)
 /* --- Arena allocator --- */
 
 typedef struct Block Block;
-struct Block
-{
+struct Block {
     Block *next;
     char *cur;
     char *end;
     char buf[];
 };
 
-typedef struct
-{
+typedef struct {
     Block *head;
     Block *tail;
     size_t block_sz;
@@ -83,8 +81,7 @@ typedef struct
 
 /* --- Hash table slot --- */
 
-typedef struct
-{
+typedef struct {
     char *word;
     unsigned long long hash;
     size_t cnt;
@@ -92,8 +89,7 @@ typedef struct
 
 /* --- wc object --- */
 
-struct wc
-{
+struct wc {
     Slot *tab;
     size_t cap;
     size_t len;
@@ -199,8 +195,7 @@ static void arena_free(wc *w)
 
     WC_ASSERT(w != NULL);
     b = w->arena.head;
-    while (b)
-    {
+    while (b) {
         Block *n = b->next;
         size_t cap = (size_t)(b->end - b->buf);
         size_t total = sizeof(Block) + cap;
@@ -235,8 +230,7 @@ static void *arena_alloc(wc *w, size_t sz)
     pad = (align - (offset % align)) % align;
 
     avail = (size_t)(a->tail->end - a->tail->cur);
-    if (avail >= pad && avail - pad >= sz)
-    {
+    if (avail >= pad && avail - pad >= sz) {
         p = a->tail->cur + pad;
         a->tail->cur = p + sz;
         WC_ASSERT(a->tail->cur <= a->tail->end);
@@ -268,8 +262,7 @@ static unsigned long long fnv(const char *s, size_t n)
 {
     unsigned long long h = FNV_OFF;
     size_t i;
-    for (i = 0; i < n; i++)
-    {
+    for (i = 0; i < n; i++) {
         h ^= (unsigned char)s[i];
         h *= FNV_MUL;
     }
@@ -304,8 +297,7 @@ static int tab_grow(wc *w)
         return -1;
     memset(ns, 0, alloc);
 
-    for (i = 0; i < w->cap; i++)
-    {
+    for (i = 0; i < w->cap; i++) {
         const Slot *s = &w->tab[i];
         if (!s->word)
             continue;
@@ -339,8 +331,7 @@ static Slot *tab_find(wc *w, const char *word, size_t n, unsigned long long h)
     idx = (size_t)(h & (w->cap - 1));
     start = idx;
 
-    do
-    {
+    do {
         Slot *s = &w->tab[idx];
         if (!s->word)
             return s;
@@ -362,8 +353,7 @@ static int tab_insert(wc *w, const char *word, size_t n, unsigned long long h)
     WC_ASSERT(word != NULL);
     WC_ASSERT(n > 0);
 
-    if (w->len * 10 >= w->cap * 7)
-    {
+    if (w->len * 10 >= w->cap * 7) {
         if (tab_grow(w) < 0)
             return -1;
     }
@@ -372,8 +362,7 @@ static int tab_insert(wc *w, const char *word, size_t n, unsigned long long h)
     if (!s)
         return -1;
 
-    if (s->word)
-    {
+    if (s->word) {
         s->cnt++;
         w->tot++;
         return 0;
@@ -404,22 +393,19 @@ tune_params(const wc_limits *lim, size_t *init_cap, size_t *block_sz)
     size_t cap = WC_DEFAULT_INIT_CAP;
     size_t blk = WC_DEFAULT_BLOCK_SZ;
 
-    if (lim)
-    {
+    if (lim) {
         if (lim->init_cap)
             cap = lim->init_cap;
         if (lim->block_size)
             blk = lim->block_size;
 
-        if (lim->max_bytes)
-        {
+        if (lim->max_bytes) {
             size_t b = lim->max_bytes;
             size_t table_budget = b / 2;
             size_t arena_budget = b - table_budget;
 
             if (!mul_overflows(cap, sizeof(Slot)) &&
-                cap * sizeof(Slot) > table_budget && table_budget > 0)
-            {
+                cap * sizeof(Slot) > table_budget && table_budget > 0) {
                 size_t max_cap = table_budget / sizeof(Slot);
                 if (max_cap < 16)
                     max_cap = 16;
@@ -486,16 +472,14 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits)
     w->maxw = max_word;
 
     /* Allocate initial hash table */
-    if (mul_overflows(init_cap, sizeof(Slot)))
-    {
+    if (mul_overflows(init_cap, sizeof(Slot))) {
         WC_FREE(w);
         return NULL;
     }
     table_bytes = init_cap * sizeof(Slot);
 
     w->tab = (Slot *)wc_xmalloc(w, table_bytes);
-    if (!w->tab)
-    {
+    if (!w->tab) {
         WC_FREE(w);
         return NULL;
     }
@@ -503,8 +487,7 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits)
     w->cap = init_cap;
 
     /* Initialize arena */
-    if (arena_init(w, &w->arena, block_sz) < 0)
-    {
+    if (arena_init(w, &w->arena, block_sz) < 0) {
         wc_xfree(w, w->tab, table_bytes);
         WC_FREE(w);
         return NULL;
@@ -513,8 +496,7 @@ wc *wc_open_ex(size_t max_word, const wc_limits *limits)
 #if !WC_STACK_BUFFER
     /* Optional heap-based scan buffer */
     w->scanbuf = (char *)wc_xmalloc(w, w->maxw);
-    if (!w->scanbuf)
-    {
+    if (!w->scanbuf) {
         arena_free(w);
         wc_xfree(w, w->tab, table_bytes);
         WC_FREE(w);
@@ -542,8 +524,7 @@ void wc_close(wc *w)
         wc_xfree(w, w->scanbuf, w->maxw);
 #endif
 
-    if (w->tab && w->cap)
-    {
+    if (w->tab && w->cap) {
         table_bytes = w->cap * sizeof(Slot);
         wc_xfree(w, w->tab, table_bytes);
     }
@@ -604,8 +585,7 @@ int wc_scan(wc *restrict w, const char *restrict text, size_t len)
     p = (const unsigned char *)text;
     end = p + len;
 
-    while (p < end)
-    {
+    while (p < end) {
         size_t n;
         unsigned long long h;
 
@@ -616,11 +596,9 @@ int wc_scan(wc *restrict w, const char *restrict text, size_t len)
 
         h = FNV_OFF;
         n = 0;
-        while (p < end && isalpha_(*p))
-        {
+        while (p < end && isalpha_(*p)) {
             unsigned c = *p++ | 32;
-            if (n < w->maxw)
-            {
+            if (n < w->maxw) {
                 buf[n++] = (char)c;
                 h ^= c;
                 h *= FNV_MUL;
@@ -665,8 +643,7 @@ int wc_results(const wc *restrict w, wc_word **restrict out, size_t *restrict n)
 
     if (!w || !out || !n)
         return WC_ERROR;
-    if (w->len == 0)
-    {
+    if (w->len == 0) {
         *out = NULL;
         *n = 0;
         return WC_OK;
@@ -686,21 +663,17 @@ int wc_results(const wc *restrict w, wc_word **restrict out, size_t *restrict n)
         return WC_NOMEM;
 
     cnt = 0;
-    for (i = 0; i < w->cap; i++)
-    {
+    for (i = 0; i < w->cap; i++) {
         if (w->tab[i].word)
             cnt++;
     }
-    if (cnt != w->len)
-    {
+    if (cnt != w->len) {
         WC_FREE(arr);
         return WC_ERROR;
     }
 
-    for (i = 0, j = 0; i < w->cap; i++)
-    {
-        if (w->tab[i].word)
-        {
+    for (i = 0, j = 0; i < w->cap; i++) {
+        if (w->tab[i].word) {
             arr[j].word = w->tab[i].word;
             arr[j].count = w->tab[i].cnt;
             j++;
@@ -721,8 +694,7 @@ void wc_results_free(wc_word *r)
 
 const char *wc_errstr(int rc)
 {
-    switch (rc)
-    {
+    switch (rc) {
         case WC_OK:
             return "success";
         case WC_ERROR:

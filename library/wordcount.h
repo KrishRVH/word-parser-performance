@@ -73,8 +73,7 @@
 #include <stdlib.h>
 
 #ifdef __cplusplus
-extern "C"
-{
+extern "C" {
 #endif
 
 /*
@@ -167,8 +166,7 @@ typedef struct wc wc;
 ** others at 0 to let the library derive conservative values. On
 ** larger systems, you can tune init_cap/block_size directly.
 */
-typedef struct wc_limits
-{
+typedef struct wc_limits {
     size_t max_bytes;
     size_t init_cap;
     size_t block_size;
@@ -177,8 +175,7 @@ typedef struct wc_limits
 /*
 ** Result entry returned by wc_results().
 */
-typedef struct wc_word
-{
+typedef struct wc_word {
     const char *word;
     size_t count;
 } wc_word;
@@ -217,14 +214,14 @@ void wc_close(wc *w);
 ** Add a single word (case-sensitive, truncates at max_word).
 ** Empty strings are ignored. Returns WC_OK, WC_ERROR, or WC_NOMEM.
 */
-int wc_add(wc *restrict w, const char *restrict word);
+int wc_add(wc *w, const char *restrict word);
 
 /*
 ** Scan text for words (lowercases, truncates at max_word).
 ** Non-alphabetic characters are word separators.
 ** Returns WC_OK, WC_ERROR, or WC_NOMEM.
 */
-int wc_scan(wc *restrict w, const char *restrict text, size_t len);
+int wc_scan(wc *w, const char *restrict text, size_t len);
 
 /*
 ** Query total word count. Returns 0 if w is NULL.
@@ -249,9 +246,7 @@ size_t wc_unique(const wc *w);
 ** is not counted against max_bytes in wc_limits, since its lifetime
 ** is entirely under the caller's control.
 */
-int wc_results(const wc *restrict w,
-               wc_word **restrict out,
-               size_t *restrict n);
+int wc_results(const wc *w, wc_word **restrict out, size_t *restrict n);
 
 /*
 ** Free results array. NULL-safe.

@@ -73,8 +73,7 @@
  * Hash Table Entry
  *===========================================================================*/
 
-typedef struct
-{
+typedef struct {
     char *word;
     uint32_t count;
     uint32_t hash;
@@ -86,8 +85,7 @@ typedef struct
  * Per-Thread Table with Arena
  *===========================================================================*/
 
-typedef struct __attribute__((aligned(CACHELINE)))
-{
+typedef struct __attribute__((aligned(CACHELINE))) {
     Entry *entries;
     char *pool;
     size_t pool_used;
@@ -125,8 +123,7 @@ static void detect_vcache(void)
     size_t best_l3 = 0;
     int best_count = 0;
 
-    for (int cpu = 0; cpu < ncpus && cpu < 256; cpu++)
-    {
+    for (int cpu = 0; cpu < ncpus && cpu < 256; cpu++) {
         (void)snprintf(path,
                        sizeof(path),
                        "/sys/devices/system/cpu/cpu%d/cache/index3/size",
@@ -134,8 +131,7 @@ static void detect_vcache(void)
         FILE *fsz = fopen(path, "r");
         if (!fsz)
             continue;
-        if (!fgets(sizebuf, (int)sizeof(sizebuf), fsz))
-        {
+        if (!fgets(sizebuf, (int)sizeof(sizebuf), fsz)) {
             (void)fclose(fsz);
             continue;
         }
@@ -163,8 +159,7 @@ static void detect_vcache(void)
         FILE *f = fopen(path, "r");
         if (!f)
             continue;
-        if (!fgets(buf, (int)sizeof(buf), f))
-        {
+        if (!fgets(buf, (int)sizeof(buf), f)) {
             (void)fclose(f);
             continue;
         }
@@ -173,23 +168,19 @@ static void detect_vcache(void)
         int list[256];
         int cnt = 0;
         char *p = buf;
-        while (*p && cnt < 256)
-        {
+        while (*p && cnt < 256) {
             char *endp = NULL;
             long start = strtol(p, &endp, 10);
             if (endp == p)
                 break;
 
-            if (*endp == '-')
-            {
+            if (*endp == '-') {
                 char *endp2 = NULL;
                 long end = strtol(endp + 1, &endp2, 10);
                 for (long i = start; i <= end && cnt < 256; i++)
                     list[cnt++] = (int)i;
                 p = endp2;
-            }
-            else
-            {
+            } else {
                 list[cnt++] = (int)start;
                 p = endp;
             }
@@ -200,8 +191,7 @@ static void detect_vcache(void)
                 p++;
         }
 
-        if (l3_bytes > best_l3 || (l3_bytes == best_l3 && cnt > best_count))
-        {
+        if (l3_bytes > best_l3 || (l3_bytes == best_l3 && cnt > best_count)) {
             best_l3 = l3_bytes;
             best_count = cnt;
             for (int j = 0; j < cnt && j < 256; j++)
@@ -248,24 +238,21 @@ static inline uint32_t hash_word(const char *s, size_t len)
 {
     uint64_t h = 0;
     const uint8_t *p = (const uint8_t *)s;
-    while (len >= 8)
-    {
+    while (len >= 8) {
         uint64_t v;
         memcpy(&v, p, 8);
         h = _mm_crc32_u64(h, v);
         p += 8;
         len -= 8;
     }
-    if (len >= 4)
-    {
+    if (len >= 4) {
         uint32_t v;
         memcpy(&v, p, 4);
         h = _mm_crc32_u32((uint32_t)h, v);
         p += 4;
         len -= 4;
     }
-    while (len--)
-    {
+    while (len--) {
         h = _mm_crc32_u8((uint32_t)h, *p++);
     }
     return crc32c_finalize(h);
@@ -274,8 +261,7 @@ static inline uint32_t hash_word(const char *s, size_t len)
 static inline uint32_t hash_word(const char *s, size_t len)
 {
     uint32_t h = 2166136261u;
-    for (size_t i = 0; i < len; i++)
-    {
+    for (size_t i = 0; i < len; i++) {
         h ^= (uint8_t)s[i];
         h *= 16777619u;
     }
@@ -291,22 +277,18 @@ static inline char *pool_alloc(Table *t, size_t len)
 {
     size_t needed = (len + 1 + 7) & ~(size_t)7; /* 8-byte alignment */
 
-    if (t->pool_used + needed > POOL_SIZE)
-    {
+    if (t->pool_used + needed > POOL_SIZE) {
         /* Overflow: use malloc */
         char *p = malloc(len + 1);
-        if (!p)
-        {
+        if (!p) {
             perror("malloc");
             exit(1);
         }
 
-        if (t->overflow_count == t->overflow_cap)
-        {
+        if (t->overflow_count == t->overflow_cap) {
             size_t cap = t->overflow_cap ? t->overflow_cap * 2 : 64;
             char **tmp = realloc(t->overflow, cap * sizeof(char *));
-            if (!tmp)
-            {
+            if (!tmp) {
                 free(p);
                 perror("realloc");
                 exit(1);
@@ -331,16 +313,14 @@ static void table_grow(Table *t)
 {
     size_t new_cap = t->cap * 2;
     Entry *new_ent = aligned_alloc(CACHELINE, new_cap * sizeof(Entry));
-    if (!new_ent)
-    {
+    if (!new_ent) {
         perror("aligned_alloc");
         exit(1);
     }
     memset(new_ent, 0, new_cap * sizeof(Entry));
 
     size_t mask = new_cap - 1;
-    for (size_t i = 0; i < t->cap; i++)
-    {
+    for (size_t i = 0; i < t->cap; i++) {
         const Entry *e = &t->entries[i];
         if (!e->word)
             continue;
@@ -367,12 +347,10 @@ table_insert(Table *t, const char *word, size_t len, uint32_t hash, uint16_t fp)
     size_t mask = t->cap - 1;
     size_t idx = hash & mask;
 
-    for (;;)
-    {
+    for (;;) {
         Entry *e = &t->entries[idx];
 
-        if (!e->word)
-        {
+        if (!e->word) {
             /* New entry */
             char *s = pool_alloc(t, len);
             memcpy(s, word, len);
@@ -400,8 +378,7 @@ table_insert(Table *t, const char *word, size_t len, uint32_t hash, uint16_t fp)
 
         /* Check for match: hash + len + fingerprint + memcmp */
         if (e->hash == hash && e->len == len && e->fp16 == fp &&
-            memcmp(e->word, word, len) == 0)
-        {
+            memcmp(e->word, word, len) == 0) {
             e->count++;
             t->total++;
             return;
@@ -434,12 +411,10 @@ process_scalar(Table *t, const char *data, size_t size, int drop_leading)
     uint64_t crc = 0;
 #endif
 
-    for (size_t i = 0; i < size; i++)
-    {
+    for (size_t i = 0; i < size; i++) {
         unsigned char c = (unsigned char)data[i];
 
-        if (drop_leading)
-        {
+        if (drop_leading) {
             if (!is_letter(c))
                 drop_leading = 0;
             else
@@ -447,12 +422,10 @@ process_scalar(Table *t, const char *data, size_t size, int drop_leading)
         }
 
         /* Handle UTF-8 multibyte sequences */
-        if (c >= 0x80)
-        {
+        if (c >= 0x80) {
             while (i + 1 < size && (data[i + 1] & 0xC0) == 0x80)
                 i++;
-            if (word_len > 0)
-            {
+            if (word_len > 0) {
                 word[word_len] = '\0';
 #ifdef __SSE4_2__
                 uint32_t h = crc32c_finalize(crc);
@@ -469,19 +442,15 @@ process_scalar(Table *t, const char *data, size_t size, int drop_leading)
             continue;
         }
 
-        if (is_letter(c))
-        {
-            if (word_len < MAX_WORD - 1)
-            {
+        if (is_letter(c)) {
+            if (word_len < MAX_WORD - 1) {
                 char lc = (char)(c | 0x20);
                 word[word_len++] = lc;
 #ifdef __SSE4_2__
                 crc = _mm_crc32_u8((uint32_t)crc, (uint8_t)lc);
 #endif
             }
-        }
-        else if (word_len > 0)
-        {
+        } else if (word_len > 0) {
             word[word_len] = '\0';
 #ifdef __SSE4_2__
             uint32_t h = crc32c_finalize(crc);
@@ -498,8 +467,7 @@ process_scalar(Table *t, const char *data, size_t size, int drop_leading)
     }
 
     /* Flush remaining word */
-    if (word_len > 0)
-    {
+    if (word_len > 0) {
         word[word_len] = '\0';
 #ifdef __SSE4_2__
         uint32_t h = crc32c_finalize(crc);
@@ -532,8 +500,7 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
 
     const size_t simd_end = size - (size % 64);
 
-    for (; i < simd_end; i += 64)
-    {
+    for (; i < simd_end; i += 64) {
         __m512i chunk = _mm512_loadu_si512((const __m512i *)(data + i));
 
         /* Build letter mask */
@@ -546,10 +513,8 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
         uint64_t letters = (uint64_t)((m_up | m_lo) & ascii);
 
         /* Handle word boundary from previous chunk */
-        if (prev_tail_letter && !(letters & 1ULL))
-        {
-            if (word_len > 0)
-            {
+        if (prev_tail_letter && !(letters & 1ULL)) {
+            if (word_len > 0) {
                 word[word_len] = '\0';
 #ifdef __SSE4_2__
                 uint32_t h = crc32c_finalize(crc);
@@ -567,24 +532,19 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
         }
 
         /* Handle drop_leading */
-        if (drop_leading && (letters & 1ULL))
-        {
+        if (drop_leading && (letters & 1ULL)) {
             if ((~letters) == 0ULL)
                 continue;
             unsigned lead = (unsigned)__builtin_ctzll(~letters);
             letters &= (~0ULL << lead);
             drop_leading = 0;
-        }
-        else if (drop_leading)
-        {
+        } else if (drop_leading) {
             drop_leading = 0;
         }
 
         /* No letters in chunk */
-        if (letters == 0ULL)
-        {
-            if (word_len > 0)
-            {
+        if (letters == 0ULL) {
+            if (word_len > 0) {
                 word[word_len] = '\0';
 #ifdef __SSE4_2__
                 uint32_t h = crc32c_finalize(crc);
@@ -604,8 +564,7 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
 
         /* Process runs of letters */
         uint64_t m = letters;
-        while (m)
-        {
+        while (m) {
             unsigned start = (unsigned)__builtin_ctzll(m);
             uint64_t tail = m >> start;
             unsigned run_len = ((~tail) == 0ULL)
@@ -613,8 +572,7 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
                                        : (unsigned)__builtin_ctzll(~tail);
 
             /* Flush word before gap */
-            if (start > 0 && word_len > 0)
-            {
+            if (start > 0 && word_len > 0) {
                 word[word_len] = '\0';
 #ifdef __SSE4_2__
                 uint32_t h = crc32c_finalize(crc);
@@ -631,8 +589,7 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
 
             /* Accumulate characters */
             const char *src = data + i + start;
-            for (unsigned k = 0; k < run_len && word_len < MAX_WORD - 1; k++)
-            {
+            for (unsigned k = 0; k < run_len && word_len < MAX_WORD - 1; k++) {
                 char lc = (char)(src[k] | 0x20);
                 word[word_len++] = lc;
 #ifdef __SSE4_2__
@@ -641,10 +598,8 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
             }
 
             /* Flush if run ended within chunk */
-            if (start + run_len < 64)
-            {
-                if (word_len > 0)
-                {
+            if (start + run_len < 64) {
+                if (word_len > 0) {
                     word[word_len] = '\0';
 #ifdef __SSE4_2__
                     uint32_t h = crc32c_finalize(crc);
@@ -659,9 +614,7 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
                     word_len = 0;
                 }
                 prev_tail_letter = 0;
-            }
-            else
-            {
+            } else {
                 prev_tail_letter = 1;
             }
 
@@ -675,24 +628,20 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
     }
 
     /* Process tail with scalar */
-    for (; i < size; i++)
-    {
+    for (; i < size; i++) {
         unsigned char c = (unsigned char)data[i];
 
-        if (drop_leading)
-        {
+        if (drop_leading) {
             if (!is_letter(c))
                 drop_leading = 0;
             else
                 continue;
         }
 
-        if (c >= 0x80)
-        {
+        if (c >= 0x80) {
             while (i + 1 < size && (data[i + 1] & 0xC0) == 0x80)
                 i++;
-            if (word_len > 0)
-            {
+            if (word_len > 0) {
                 word[word_len] = '\0';
 #ifdef __SSE4_2__
                 uint32_t h = crc32c_finalize(crc);
@@ -709,19 +658,15 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
             continue;
         }
 
-        if (is_letter(c))
-        {
-            if (word_len < MAX_WORD - 1)
-            {
+        if (is_letter(c)) {
+            if (word_len < MAX_WORD - 1) {
                 char lc = (char)(c | 0x20);
                 word[word_len++] = lc;
 #ifdef __SSE4_2__
                 crc = _mm_crc32_u8((uint32_t)crc, (uint8_t)lc);
 #endif
             }
-        }
-        else if (word_len > 0)
-        {
+        } else if (word_len > 0) {
             word[word_len] = '\0';
 #ifdef __SSE4_2__
             uint32_t h = crc32c_finalize(crc);
@@ -738,8 +683,7 @@ process_avx512(Table *t, const char *data, size_t size, int drop_leading)
     }
 
     /* Flush final word */
-    if (word_len > 0)
-    {
+    if (word_len > 0) {
         word[word_len] = '\0';
 #ifdef __SSE4_2__
         uint32_t h = crc32c_finalize(crc);
@@ -768,8 +712,7 @@ process_chunk(Table *t, const char *data, size_t size, int drop_leading)
  * Worker Thread
  *===========================================================================*/
 
-typedef struct
-{
+typedef struct {
     const char *data;
     size_t start;
     size_t end;
@@ -785,8 +728,7 @@ static void *worker(void *arg)
     WorkUnit *u = arg;
 
     /* Pin to V-Cache CCD if available */
-    if (vcache_count > 0)
-    {
+    if (vcache_count > 0) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
         int cpu = vcache_cpus[u->id % vcache_count];
@@ -813,8 +755,7 @@ merge_tables(size_t *out_unique, size_t *out_total, size_t *out_cap)
 
     size_t cap = next_pow2(est * 2);
     Entry *global = aligned_alloc(CACHELINE, cap * sizeof(Entry));
-    if (!global)
-    {
+    if (!global) {
         perror("aligned_alloc");
         exit(1);
     }
@@ -824,24 +765,20 @@ merge_tables(size_t *out_unique, size_t *out_total, size_t *out_cap)
     size_t gtotal = 0;
     size_t mask = cap - 1;
 
-    for (int ti = 0; ti < NUM_THREADS; ti++)
-    {
+    for (int ti = 0; ti < NUM_THREADS; ti++) {
         Table *tbl = &tables[ti];
         gtotal += tbl->total;
 
-        for (size_t i = 0; i < tbl->cap; i++)
-        {
+        for (size_t i = 0; i < tbl->cap; i++) {
             const Entry *e = &tbl->entries[i];
             if (!e->word)
                 continue;
 
             size_t idx = e->hash & mask;
-            while (global[idx].word)
-            {
+            while (global[idx].word) {
                 if (global[idx].hash == e->hash && global[idx].len == e->len &&
                     global[idx].fp16 == e->fp16 &&
-                    memcmp(global[idx].word, e->word, e->len) == 0)
-                {
+                    memcmp(global[idx].word, e->word, e->len) == 0) {
                     global[idx].count += e->count;
                     goto next;
                 }
@@ -884,8 +821,7 @@ static void print_top(const Entry *entries,
         return;
 
     size_t j = 0;
-    for (size_t i = 0; i < cap && j < unique; i++)
-    {
+    for (size_t i = 0; i < cap && j < unique; i++) {
         if (entries[i].word)
             arr[j++] = entries[i];
     }
@@ -894,8 +830,7 @@ static void print_top(const Entry *entries,
 
     printf("\n=== Top %d Words ===\n", TOP_N);
     size_t n = unique < TOP_N ? unique : TOP_N;
-    for (size_t i = 0; i < n; i++)
-    {
+    for (size_t i = 0; i < n; i++) {
         printf("%2zu. %-15s %9u  (%5.2f%%)\n",
                i + 1,
                arr[i].word,
@@ -946,28 +881,24 @@ int main(int argc, char *argv[])
 
     /* Open and mmap file */
     fd = open(path, O_RDONLY);
-    if (fd < 0)
-    {
+    if (fd < 0) {
         perror("open");
         goto cleanup;
     }
 
     struct stat st;
-    if (fstat(fd, &st) < 0)
-    {
+    if (fstat(fd, &st) < 0) {
         perror("fstat");
         goto cleanup;
     }
-    if (st.st_size <= 0)
-    {
+    if (st.st_size <= 0) {
         (void)fprintf(stderr, "Empty file\n");
         goto cleanup;
     }
     file_size = (size_t)st.st_size;
 
     data = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (data == MAP_FAILED)
-    {
+    if (data == MAP_FAILED) {
         perror("mmap");
         goto cleanup;
     }
@@ -979,8 +910,7 @@ int main(int argc, char *argv[])
     size_t cuts[NUM_THREADS + 1];
     cuts[0] = 0;
     cuts[NUM_THREADS] = file_size;
-    for (int i = 1; i < NUM_THREADS; i++)
-    {
+    for (int i = 1; i < NUM_THREADS; i++) {
         size_t c = (file_size * (size_t)i) / NUM_THREADS;
         while (c < file_size && is_letter((unsigned char)data[c]))
             c++;
@@ -988,8 +918,7 @@ int main(int argc, char *argv[])
     }
 
     /* Initialize per-thread tables with dynamic sizing */
-    for (int i = 0; i < NUM_THREADS; i++)
-    {
+    for (int i = 0; i < NUM_THREADS; i++) {
         Table *t = &tables[i];
         size_t chunk_size = cuts[i + 1] - cuts[i];
         size_t estimated_words = chunk_size / 5;
@@ -1000,16 +929,14 @@ int main(int argc, char *argv[])
             t->cap = INITIAL_CAP;
 
         t->entries = aligned_alloc(CACHELINE, t->cap * sizeof(Entry));
-        if (!t->entries)
-        {
+        if (!t->entries) {
             perror("aligned_alloc");
             goto cleanup;
         }
         memset(t->entries, 0, t->cap * sizeof(Entry));
 
         t->pool = aligned_alloc(CACHELINE, POOL_SIZE);
-        if (!t->pool)
-        {
+        if (!t->pool) {
             perror("aligned_alloc");
             goto cleanup;
         }
@@ -1037,14 +964,12 @@ int main(int argc, char *argv[])
 
     /* Launch workers */
     (void)pthread_barrier_init(&barrier, NULL, NUM_THREADS + 1);
-    for (int i = 0; i < NUM_THREADS; i++)
-    {
+    for (int i = 0; i < NUM_THREADS; i++) {
         (void)pthread_create(&threads[i], NULL, worker, &units[i]);
     }
 
     (void)pthread_barrier_wait(&barrier);
-    for (int i = 0; i < NUM_THREADS; i++)
-    {
+    for (int i = 0; i < NUM_THREADS; i++) {
         (void)pthread_join(threads[i], NULL);
     }
     (void)pthread_barrier_destroy(&barrier);
@@ -1064,10 +989,8 @@ int main(int argc, char *argv[])
 
 cleanup:
     free(global);
-    for (int i = 0; i < tables_init; i++)
-    {
-        for (size_t j = 0; j < tables[i].overflow_count; j++)
-        {
+    for (int i = 0; i < tables_init; i++) {
+        for (size_t j = 0; j < tables[i].overflow_count; j++) {
             free(tables[i].overflow[j]);
         }
         free(tables[i].overflow);

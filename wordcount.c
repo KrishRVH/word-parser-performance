@@ -39,8 +39,7 @@
  * Configuration
  * ═══════════════════════════════════════════════════════════════════════════*/
 
-enum
-{
+enum {
     MAX_THREADS = 32,
     INITIAL_CAP = 1 << 12,
     MAX_WORD_LEN = 63,
@@ -53,8 +52,7 @@ _Static_assert((INITIAL_CAP & (INITIAL_CAP - 1)) == 0, "must be power of 2");
  * Platform: Memory-Mapped Files
  * ═══════════════════════════════════════════════════════════════════════════*/
 
-typedef struct
-{
+typedef struct {
     const char *data;
     size_t size;
 #ifdef PLATFORM_WINDOWS
@@ -89,8 +87,7 @@ static int mf_open(MappedFile *mf, const char *path)
         goto fail;
 
     mf->data = MapViewOfFile(mf->mapping, FILE_MAP_READ, 0, 0, 0);
-    if (!mf->data)
-    {
+    if (!mf->data) {
         CloseHandle(mf->mapping);
         mf->mapping = NULL;
         goto fail;
@@ -108,8 +105,7 @@ fail:
         return -1;
 
     struct stat st;
-    if (fstat(mf->fd, &st) < 0 || st.st_size == 0)
-    {
+    if (fstat(mf->fd, &st) < 0 || st.st_size == 0) {
         close(mf->fd);
         mf->fd = -1;
         return -1;
@@ -117,8 +113,7 @@ fail:
     mf->size = (size_t)st.st_size;
 
     mf->data = mmap(NULL, mf->size, PROT_READ, MAP_PRIVATE, mf->fd, 0);
-    if (mf->data == MAP_FAILED)
-    {
+    if (mf->data == MAP_FAILED) {
         mf->data = NULL;
         close(mf->fd);
         mf->fd = -1;
@@ -179,8 +174,7 @@ static int ncpu(void)
  * released at once. Alignment handled via pointer arithmetic.
  * ═══════════════════════════════════════════════════════════════════════════*/
 
-typedef struct
-{
+typedef struct {
     char *buf, *ptr, *end;
 } Arena;
 
@@ -220,15 +214,13 @@ static void *arena_alloc(Arena *a, size_t size, size_t align)
 #define FNV_OFFSET 14695981039346656037ULL
 #define FNV_PRIME 1099511628211ULL
 
-typedef struct
-{
+typedef struct {
     char *key;
     size_t count;
     uint64_t hash;
 } Entry;
 
-typedef struct
-{
+typedef struct {
     Entry *entries;
     size_t cap, len, total;
     Arena strings;
@@ -239,8 +231,7 @@ static int table_init(Table *t, size_t cap, size_t arena_cap)
     t->entries = calloc(cap, sizeof(Entry));
     if (!t->entries)
         return -1;
-    if (arena_init(&t->strings, arena_cap) < 0)
-    {
+    if (arena_init(&t->strings, arena_cap) < 0) {
         free(t->entries);
         t->entries = NULL;
         return -1;
@@ -266,8 +257,7 @@ static int table_grow(Table *t)
     if (!new_ent)
         return -1;
 
-    for (size_t i = 0; i < t->cap; i++)
-    {
+    for (size_t i = 0; i < t->cap; i++) {
         const Entry *e = &t->entries[i];
         if (!e->key)
             continue;
@@ -288,11 +278,9 @@ static int table_add(Table *t, const char *word, size_t len, uint64_t hash)
         return -1;
 
     size_t idx = hash & (t->cap - 1);
-    for (;;)
-    {
+    for (;;) {
         Entry *e = &t->entries[idx];
-        if (!e->key)
-        {
+        if (!e->key) {
             char *s = arena_alloc(&t->strings, len + 1, 1);
             if (!s)
                 return -1;
@@ -303,8 +291,7 @@ static int table_add(Table *t, const char *word, size_t len, uint64_t hash)
             t->total++;
             return 0;
         }
-        if (e->hash == hash && memcmp(e->key, word, len) == 0 && !e->key[len])
-        {
+        if (e->hash == hash && memcmp(e->key, word, len) == 0 && !e->key[len]) {
             e->count++;
             t->total++;
             return 0;
@@ -331,8 +318,7 @@ static int tokenize(Table *t, const char *data, size_t len)
     const unsigned char *end = p + len;
     char word[MAX_WORD_LEN + 1];
 
-    while (p < end)
-    {
+    while (p < end) {
         while (p < end && !is_alpha(*p))
             p++;
         if (p >= end)
@@ -341,8 +327,7 @@ static int tokenize(Table *t, const char *data, size_t len)
         uint64_t hash = FNV_OFFSET;
         size_t wlen = 0;
 
-        while (p < end && is_alpha(*p))
-        {
+        while (p < end && is_alpha(*p)) {
             unsigned c = *p++ | 32;
             hash = (hash ^ c) * FNV_PRIME;
             if (wlen < MAX_WORD_LEN)
@@ -358,8 +343,7 @@ static int tokenize(Table *t, const char *data, size_t len)
  * Worker Threads
  * ═══════════════════════════════════════════════════════════════════════════*/
 
-typedef struct
-{
+typedef struct {
     const char *data;
     size_t len;
     Table table;
@@ -387,8 +371,7 @@ static void *worker_entry(void *arg)
 
 static int spawn_workers(Worker *w, int n)
 {
-    for (int i = 0; i < n; i++)
-    {
+    for (int i = 0; i < n; i++) {
 #ifdef PLATFORM_WINDOWS
         g_threads[i] =
                 (HANDLE)_beginthreadex(NULL, 0, worker_entry, &w[i], 0, NULL);
@@ -422,11 +405,9 @@ static void join_workers(void)
 
 static int merge_into(Table *dst, Worker *workers, int n)
 {
-    for (int w = 0; w < n; w++)
-    {
+    for (int w = 0; w < n; w++) {
         Table *src = &workers[w].table;
-        for (size_t i = 0; i < src->cap; i++)
-        {
+        for (size_t i = 0; i < src->cap; i++) {
             const Entry *e = &src->entries[i];
             if (!e->key)
                 continue;
@@ -435,18 +416,15 @@ static int merge_into(Table *dst, Worker *workers, int n)
                 return -1;
 
             size_t idx = e->hash & (dst->cap - 1);
-            for (;;)
-            {
+            for (;;) {
                 Entry *d = &dst->entries[idx];
-                if (!d->key)
-                {
+                if (!d->key) {
                     *d = *e;
                     dst->len++;
                     dst->total += e->count;
                     break;
                 }
-                if (d->hash == e->hash && strcmp(d->key, e->key) == 0)
-                {
+                if (d->hash == e->hash && strcmp(d->key, e->key) == 0) {
                     d->count += e->count;
                     dst->total += e->count;
                     break;
@@ -503,8 +481,7 @@ static void print_top(const Table *t, size_t n)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2)
-    {
+    if (argc != 2) {
         (void)fprintf(stderr, "usage: %s <file>\n", argv[0]);
         return 1;
     }
@@ -515,8 +492,7 @@ int main(int argc, char **argv)
     Entry *merged_entries = NULL;
     int nworkers = 0;
 
-    if (mf_open(&mf, argv[1]) < 0)
-    {
+    if (mf_open(&mf, argv[1]) < 0) {
         (void)fprintf(stderr, "error: cannot open '%s'\n", argv[1]);
         goto cleanup;
     }
@@ -535,8 +511,7 @@ int main(int argc, char **argv)
     size_t chunk = mf.size / (size_t)nworkers;
     size_t arena_size = (chunk / 4 > (1 << 20)) ? chunk / 4 : (1 << 20);
 
-    for (int i = 0; i < nworkers; i++)
-    {
+    for (int i = 0; i < nworkers; i++) {
         size_t start = (size_t)i * chunk;
         size_t end = (i == nworkers - 1) ? mf.size : (size_t)(i + 1) * chunk;
 
@@ -588,8 +563,7 @@ int main(int argc, char **argv)
 
 cleanup:
     free(merged_entries);
-    if (workers)
-    {
+    if (workers) {
         for (int i = 0; i < nworkers; i++)
             table_free(&workers[i].table);
         free(workers);

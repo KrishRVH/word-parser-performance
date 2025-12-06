@@ -38,32 +38,27 @@
 static int g_run, g_pass, g_fail;
 
 #define TEST(name)                \
-    do                            \
-    {                             \
+    do {                          \
         g_run++;                  \
         printf("  %-45s ", name); \
         (void)fflush(stdout);     \
     } while (0)
 
 #define PASS()            \
-    do                    \
-    {                     \
+    do {                  \
         g_pass++;         \
         printf("[OK]\n"); \
     } while (0)
 
 #define FAIL(m)                   \
-    do                            \
-    {                             \
+    do {                          \
         g_fail++;                 \
         printf("[FAIL] %s\n", m); \
     } while (0)
 
 #define ASSERT(c)     \
-    do                \
-    {                 \
-        if (!(c))     \
-        {             \
+    do {              \
+        if (!(c)) {   \
             FAIL(#c); \
             return 1; \
         }             \
@@ -96,8 +91,7 @@ static int oom_check(void)
     if (!oom_active)
         return 0;
     oom_count++;
-    if (oom_count == oom_target)
-    {
+    if (oom_count == oom_target) {
         oom_active = 0;
         return 1;
     }
@@ -107,8 +101,7 @@ static int oom_check(void)
 void *malloc(size_t n)
 {
     extern void *__libc_malloc(size_t);
-    if (oom_check())
-    {
+    if (oom_check()) {
         errno = ENOMEM;
         return NULL;
     }
@@ -118,8 +111,7 @@ void *malloc(size_t n)
 void *calloc(size_t nm, size_t sz)
 {
     /* Overflow-safe multiplication */
-    if (nm != 0 && sz > SIZE_MAX / nm)
-    {
+    if (nm != 0 && sz > SIZE_MAX / nm) {
         errno = ENOMEM;
         return NULL;
     }
@@ -132,8 +124,7 @@ void *calloc(size_t nm, size_t sz)
 void *realloc(void *ptr, size_t n)
 {
     extern void *__libc_realloc(void *, size_t);
-    if (oom_check())
-    {
+    if (oom_check()) {
         errno = ENOMEM;
         return NULL;
     }
@@ -242,8 +233,7 @@ static int test_limits_budget_enforced(void)
     ASSERT(w != NULL);
 
     rc = WC_OK;
-    for (i = 0; i < 100000 && rc == WC_OK; i++)
-    {
+    for (i = 0; i < 100000 && rc == WC_OK; i++) {
         (void)snprintf(word, sizeof word, "w%zu", i);
         rc = wc_add(w, word);
         ASSERT(rc == WC_OK || rc == WC_NOMEM);
@@ -642,8 +632,7 @@ static int test_many_unique(void)
     size_t n = 10000;
     TEST("many unique");
     w = wc_open(0);
-    for (i = 0; i < n; i++)
-    {
+    for (i = 0; i < n; i++) {
         (void)snprintf(word, sizeof word, "word%zu", i);
         ASSERT(wc_add(w, word) == WC_OK);
     }
@@ -680,8 +669,7 @@ static int test_growth(void)
     size_t len;
     TEST("table growth");
     w = wc_open(0);
-    for (i = 0; i < n; i++)
-    {
+    for (i = 0; i < n; i++) {
         (void)snprintf(word, sizeof word, "w%zu", i);
         ASSERT(wc_add(w, word) == WC_OK);
         ASSERT(wc_add(w, word) == WC_OK);
@@ -706,15 +694,13 @@ static int test_arena_blocks(void)
     char word[32];
     TEST("arena block chain");
     w = wc_open(0);
-    for (i = 0; i < n; i++)
-    {
+    for (i = 0; i < n; i++) {
         (void)snprintf(word, sizeof word, "word%05zu", i);
         ASSERT(wc_add(w, word) == WC_OK);
     }
     ASSERT(wc_results(w, &r, &len) == WC_OK);
     ASSERT(len == n);
-    for (i = 0; i < len; i++)
-    {
+    for (i = 0; i < len; i++) {
         ASSERT(r[i].word != NULL);
         ASSERT(strlen(r[i].word) > 0);
     }
@@ -735,8 +721,7 @@ static int test_oom_open(void)
     wc *w;
     int i;
     TEST("OOM in wc_open");
-    for (i = 1; i <= 10; i++)
-    {
+    for (i = 1; i <= 10; i++) {
         oom_arm(i);
         w = wc_open(0);
         if (w)
@@ -755,8 +740,7 @@ static int test_oom_add(void)
     wc *w;
     int i, rc;
     TEST("OOM in wc_add");
-    for (i = 1; i <= 20; i++)
-    {
+    for (i = 1; i <= 20; i++) {
         w = wc_open(0);
         ASSERT(w != NULL);
         oom_arm(i);
@@ -775,8 +759,7 @@ static int test_oom_scan(void)
     const char *t = "the quick brown fox jumps over the lazy dog";
     int i, rc;
     TEST("OOM in wc_scan");
-    for (i = 1; i <= 30; i++)
-    {
+    for (i = 1; i <= 30; i++) {
         w = wc_open(0);
         ASSERT(w != NULL);
         oom_arm(i);
@@ -796,8 +779,7 @@ static int test_oom_results(void)
     size_t n;
     int i, rc;
     TEST("OOM in wc_results");
-    for (i = 1; i <= 10; i++)
-    {
+    for (i = 1; i <= 10; i++) {
         w = wc_open(0);
         ASSERT(wc_add(w, "hello") == WC_OK);
         ASSERT(wc_add(w, "world") == WC_OK);
@@ -822,8 +804,7 @@ static int test_oom_growth(void)
     int rc;
     TEST("OOM during table growth");
     w = wc_open(0);
-    for (i = 0; i < 5000; i++)
-    {
+    for (i = 0; i < 5000; i++) {
         snprintf(word, sizeof word, "word%zu", i);
         if (i == 3000)
             oom_arm(5);
@@ -844,8 +825,7 @@ static int test_oom_torture(void)
     const char *text = "alpha beta gamma delta epsilon alpha beta gamma";
     int i, max_allocs = 50;
     TEST("OOM torture (all injection points)");
-    for (i = 1; i <= max_allocs; i++)
-    {
+    for (i = 1; i <= max_allocs; i++) {
         wc *w;
         wc_word *r = NULL;
         size_t n = 0;
@@ -853,15 +833,13 @@ static int test_oom_torture(void)
 
         oom_arm(i);
         w = wc_open(0);
-        if (!w)
-        {
+        if (!w) {
             oom_reset();
             continue;
         }
 
         rc = wc_scan(w, text, strlen(text));
-        if (rc == WC_NOMEM)
-        {
+        if (rc == WC_NOMEM) {
             wc_close(w);
             oom_reset();
             continue;

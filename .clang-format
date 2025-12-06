@@ -20,7 +20,7 @@ IndentExternBlock: NoIndent
 IndentWrappedFunctionNames: false
 
 # --- Braces and control flow ---
-BreakBeforeBraces: Allman
+BreakBeforeBraces: Linux
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: Inline

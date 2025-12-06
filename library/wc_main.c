@@ -86,8 +86,7 @@ static int parse_wc_limits_from_env(wc_limits *lim)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-typedef struct
-{
+typedef struct {
     void *data;
     size_t size;
     HANDLE hFile;
@@ -100,20 +99,13 @@ typedef struct
 static void set_errno_from_win32(void)
 {
     DWORD err = GetLastError();
-    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
-    {
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
         errno = ENOENT;
-    }
-    else if (err == ERROR_ACCESS_DENIED)
-    {
+    } else if (err == ERROR_ACCESS_DENIED) {
         errno = EACCES;
-    }
-    else if (err == ERROR_NOT_ENOUGH_MEMORY || err == ERROR_OUTOFMEMORY)
-    {
+    } else if (err == ERROR_NOT_ENOUGH_MEMORY || err == ERROR_OUTOFMEMORY) {
         errno = ENOMEM;
-    }
-    else
-    {
+    } else {
         errno = EIO;
     }
 }
@@ -133,22 +125,19 @@ static int os_map(MappedFile *mf, const char *path)
                             OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL,
                             NULL);
-    if (mf->hFile == INVALID_HANDLE_VALUE)
-    {
+    if (mf->hFile == INVALID_HANDLE_VALUE) {
         set_errno_from_win32();
         return -1;
     }
 
-    if (!GetFileSizeEx(mf->hFile, &sz))
-    {
+    if (!GetFileSizeEx(mf->hFile, &sz)) {
         set_errno_from_win32();
         CloseHandle(mf->hFile);
         mf->hFile = INVALID_HANDLE_VALUE;
         return -1;
     }
 
-    if (sz.QuadPart == 0)
-    {
+    if (sz.QuadPart == 0) {
         CloseHandle(mf->hFile);
         mf->hFile = INVALID_HANDLE_VALUE;
         return 0; /* empty file is ok */
@@ -156,8 +145,7 @@ static int os_map(MappedFile *mf, const char *path)
 
     /* Reject files larger than size_t can represent */
     if (sz.QuadPart < 0 ||
-        (unsigned long long)sz.QuadPart > (unsigned long long)SIZE_MAX)
-    {
+        (unsigned long long)sz.QuadPart > (unsigned long long)SIZE_MAX) {
         CloseHandle(mf->hFile);
         mf->hFile = INVALID_HANDLE_VALUE;
         errno = EFBIG;
@@ -165,8 +153,7 @@ static int os_map(MappedFile *mf, const char *path)
     }
 
     mf->hMap = CreateFileMappingA(mf->hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!mf->hMap)
-    {
+    if (!mf->hMap) {
         set_errno_from_win32();
         CloseHandle(mf->hFile);
         mf->hFile = INVALID_HANDLE_VALUE;
@@ -174,8 +161,7 @@ static int os_map(MappedFile *mf, const char *path)
     }
 
     mf->data = MapViewOfFile(mf->hMap, FILE_MAP_READ, 0, 0, 0);
-    if (!mf->data)
-    {
+    if (!mf->data) {
         set_errno_from_win32();
         CloseHandle(mf->hMap);
         CloseHandle(mf->hFile);
@@ -210,8 +196,7 @@ static void os_unmap(MappedFile *mf)
 #include <sys/stat.h>
 #include <unistd.h>
 
-typedef struct
-{
+typedef struct {
     void *data;
     size_t size;
     int fd;
@@ -229,8 +214,7 @@ static int os_map(MappedFile *mf, const char *path)
     if (mf->fd < 0)
         return -1;
 
-    if (fstat(mf->fd, &st) < 0)
-    {
+    if (fstat(mf->fd, &st) < 0) {
         saved_errno = errno;
         close(mf->fd);
         mf->fd = -1;
@@ -238,16 +222,14 @@ static int os_map(MappedFile *mf, const char *path)
         return -1;
     }
 
-    if (st.st_size == 0)
-    {
+    if (st.st_size == 0) {
         close(mf->fd);
         mf->fd = -1;
         return 0; /* empty file is ok */
     }
 
     /* Reject files larger than size_t can represent (32-bit builds) */
-    if ((off_t)(size_t)st.st_size != st.st_size)
-    {
+    if ((off_t)(size_t)st.st_size != st.st_size) {
         close(mf->fd);
         mf->fd = -1;
         errno = EFBIG;
@@ -256,8 +238,7 @@ static int os_map(MappedFile *mf, const char *path)
 
     mf->data =
             mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, mf->fd, 0);
-    if (mf->data == MAP_FAILED)
-    {
+    if (mf->data == MAP_FAILED) {
         saved_errno = errno;
         mf->data = NULL;
         close(mf->fd);
@@ -276,8 +257,7 @@ static int os_map(MappedFile *mf, const char *path)
 
 static void os_unmap(MappedFile *mf)
 {
-    if (mf->data && mf->size > 0)
-    {
+    if (mf->data && mf->size > 0) {
         munmap(mf->data, mf->size);
     }
     if (mf->fd >= 0)
@@ -300,30 +280,22 @@ static char *read_stdin(size_t *out)
 
     *out = 0;
 
-    for (;;)
-    {
-        if (add_overflows_sz(len, (size_t)STDIN_CHUNK))
-        {
+    for (;;) {
+        if (add_overflows_sz(len, (size_t)STDIN_CHUNK)) {
             errno = ENOMEM;
             goto cleanup;
         }
 
-        if (len + (size_t)STDIN_CHUNK > cap)
-        {
+        if (len + (size_t)STDIN_CHUNK > cap) {
             size_t nc;
             char *p;
 
-            if (cap == 0)
-            {
+            if (cap == 0) {
                 nc = (size_t)STDIN_CHUNK;
-            }
-            else if (cap > SIZE_MAX / 2)
-            {
+            } else if (cap > SIZE_MAX / 2) {
                 errno = ENOMEM;
                 goto cleanup;
-            }
-            else
-            {
+            } else {
                 nc = cap * 2;
             }
 
@@ -337,8 +309,7 @@ static char *read_stdin(size_t *out)
         n = fread(buf + len, 1, STDIN_CHUNK, stdin);
         len += n;
 
-        if (n < STDIN_CHUNK)
-        {
+        if (n < STDIN_CHUNK) {
             if (ferror(stdin))
                 goto cleanup;
             break; /* EOF */
@@ -352,8 +323,7 @@ static char *read_stdin(size_t *out)
     *out = len;
 
 cleanup:
-    if (rc < 0)
-    {
+    if (rc < 0) {
         free(buf);
         return NULL;
     }
@@ -368,13 +338,11 @@ process_mapped(wc *w, const char *data, size_t size, const char *name)
     int rc;
 
     rc = wc_scan(w, data, size);
-    if (rc == WC_NOMEM)
-    {
+    if (rc == WC_NOMEM) {
         (void)fprintf(stderr, "wc: %s: %s\n", name, wc_errstr(rc));
         return -1;
     }
-    if (rc != WC_OK)
-    {
+    if (rc != WC_OK) {
         (void)fprintf(stderr, "wc: %s: %s\n", name, wc_errstr(rc));
         return -1;
     }
@@ -394,14 +362,12 @@ static int process_file(wc *w, const char *path)
     mf.fd = -1;
 #endif
 
-    if (os_map(&mf, path) < 0)
-    {
+    if (os_map(&mf, path) < 0) {
         (void)fprintf(stderr, "wc: %s: %s\n", path, strerror(errno));
         goto cleanup;
     }
 
-    if (mf.size == 0)
-    {
+    if (mf.size == 0) {
         rc = 0;
         goto cleanup;
     }
@@ -421,19 +387,14 @@ static int process_stdin(wc *w)
 
     errno = 0;
     data = read_stdin(&len);
-    if (!data)
-    {
-        if (errno == 0 && len == 0)
-        {
+    if (!data) {
+        if (errno == 0 && len == 0) {
             rc = 0;
             goto cleanup;
         }
-        if (errno)
-        {
+        if (errno) {
             (void)fprintf(stderr, "wc: <stdin>: %s\n", strerror(errno));
-        }
-        else
-        {
+        } else {
             (void)fprintf(stderr, "wc: <stdin>: read error\n");
         }
         goto cleanup;
@@ -457,19 +418,16 @@ static void output(const wc *w)
     int rc;
 
     rc = wc_results(w, &words, &len);
-    if (rc == WC_NOMEM)
-    {
+    if (rc == WC_NOMEM) {
         (void)fprintf(stderr, "wc: %s\n", wc_errstr(rc));
         goto cleanup;
     }
-    if (rc != WC_OK)
-    {
+    if (rc != WC_OK) {
         (void)fprintf(stderr, "wc: %s\n", wc_errstr(rc));
         goto cleanup;
     }
 
-    if (len == 0)
-    {
+    if (len == 0) {
         (void)fprintf(stderr, "No words found.\n");
         goto cleanup;
     }
@@ -478,8 +436,7 @@ static void output(const wc *w)
     printf("\n%7s  %-20s  %s\n", "Count", "Word", "%");
     printf("-------  --------------------  ------\n");
 
-    for (i = 0; i < n; i++)
-    {
+    for (i = 0; i < n; i++) {
         double pct = 100.0 * (double)words[i].count / (double)wc_total(w);
         printf("%7zu  %-20s  %5.2f\n", words[i].count, words[i].word, pct);
     }
@@ -503,37 +460,28 @@ int main(int argc, char **argv)
     int have_limits;
 
     have_limits = parse_wc_limits_from_env(&lim);
-    if (have_limits < 0)
-    {
+    if (have_limits < 0) {
         (void)fprintf(stderr,
                       "wc: invalid WC_MAX_BYTES value (must be integer)\n");
         goto cleanup;
     }
 
-    if (have_limits > 0)
-    {
+    if (have_limits > 0) {
         w = wc_open_ex(0, &lim);
-    }
-    else
-    {
+    } else {
         w = wc_open(0);
     }
 
-    if (!w)
-    {
+    if (!w) {
         (void)fprintf(stderr, "wc: %s\n", wc_errstr(WC_NOMEM));
         goto cleanup;
     }
 
-    if (argc < 2)
-    {
+    if (argc < 2) {
         if (process_stdin(w) < 0)
             err = 1;
-    }
-    else
-    {
-        for (i = 1; i < argc; i++)
-        {
+    } else {
+        for (i = 1; i < argc; i++) {
             if (process_file(w, argv[i]) < 0)
                 err = 1;
         }
