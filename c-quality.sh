@@ -155,6 +155,7 @@ run_cppcheck() {
             --project="$cdb_root/compile_commands.json" \
             --enable=warning,style,performance,portability \
             --inconclusive \
+			--inline-suppr \
             --suppress=missingIncludeSystem \
             --suppress=unmatchedSuppression \
             --quiet \

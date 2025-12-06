@@ -1,16 +1,16 @@
 /*
- * wc.c - Word frequency counter
+ * wc.c - word frequency counter
  *
- * Build:
- *   gcc -O2 -std=c11 -Wall -Wextra wc.c -o wc
+ * DESIGN
  *
- * Usage:
- *   ./wc <file>
+ * Hash table with chaining. Words stored inline via flexible array member.
+ * Single pass over mmap'd input: lowercase, hash, and insert in one loop.
+ * Output sorted by frequency, then alphabetically for ties.
+ *
+ * Build: cc -O2 -std=c11 wc.c -o wc
+ * Usage: ./wc <file>
  */
 
-#define _POSIX_C_SOURCE 200809L
-
-#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,397 +18,193 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------------- */
-/* Constants and Basic Utilities                                             */
-/* ------------------------------------------------------------------------- */
+#define SEED 0xcbf29ce484222325ULL
+#define MUL 0x100000001b3ULL
 
-enum
+typedef struct E E;
+struct E
 {
-    INITIAL_CAPACITY = 1024, /* must be power of two */
-    MAX_WORD = 256,
-    TOP_N = 10
+    E *next;
+    size_t cnt, h;
+    char w[];
 };
 
-_Static_assert((INITIAL_CAPACITY & (INITIAL_CAPACITY - 1)) == 0,
-               "INITIAL_CAPACITY must be a power of two");
-
-static const uint64_t FNV_OFFSET = 0xcbf29ce484222325ULL;
-static const uint64_t FNV_PRIME = 0x100000001b3ULL;
-
-static inline int is_letter_ascii(unsigned char c)
+static struct
 {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    E **tab;
+    size_t cap, n, tot;
+    char *mem;
+    size_t len;
+    int fd;
+} G;
+
+/* --- util --- */
+
+static void die(const char *s)
+{
+    (void)fprintf(stderr, "wc: %s\n", s);
+    exit(1);
 }
 
-static inline unsigned char to_lower_ascii(unsigned char c)
+static inline int alpha(unsigned c)
 {
-    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + ('a' - 'A')) : c;
+    return (c | 32) - 'a' < 26;
 }
 
-static void die_errno(const char *msg)
+/* --- table --- */
+
+static void grow(void)
 {
-    perror(msg);
-    exit(EXIT_FAILURE);
-}
+    size_t newcap = G.cap ? G.cap * 2 : 4096;
+    E **newtab = calloc(newcap, sizeof(E *));
+    if (!newtab)
+        die("out of memory");
 
-static void die_msg(const char *msg)
-{
-    (void)fputs(msg, stderr);
-    (void)fputc('\n', stderr);
-    exit(EXIT_FAILURE);
-}
-
-/* ------------------------------------------------------------------------- */
-/* Hash Map of Word -> Count (Open Addressing)                               */
-/* ------------------------------------------------------------------------- */
-
-typedef struct
-{
-    uint64_t hash;
-    char *word;
-    size_t count;
-} Entry;
-
-typedef struct
-{
-    Entry *slots;
-    size_t capacity;  /* always a power of two */
-    size_t mask;      /* capacity - 1 */
-    size_t size;      /* number of occupied entries (unique words) */
-    size_t threshold; /* capacity * load_factor */
-    size_t total;     /* total words (including repeats) */
-} HashMap;
-
-static size_t next_power_of_two(size_t n)
-{
-    if (n < 2)
-        return 2;
-
-    n--;
-    for (size_t shift = 1; shift < sizeof(size_t) * 8; shift <<= 1)
-        n |= n >> shift;
-    return n + 1;
-}
-
-static int hash_map_init(HashMap *map, size_t initial_capacity)
-{
-    if (!map)
-        return -1;
-
-    size_t cap = next_power_of_two(initial_capacity);
-    Entry *slots = calloc(cap, sizeof *slots);
-    if (!slots)
-        return -1;
-
-    map->slots = slots;
-    map->capacity = cap;
-    map->mask = cap - 1;
-    map->size = 0;
-    map->total = 0;
-
-    const double load_factor = 0.75;
-    map->threshold = (size_t)(cap * load_factor);
-
-    return 0;
-}
-
-static void hash_map_destroy(HashMap *map)
-{
-    if (!map || !map->slots)
-        return;
-
-    for (size_t i = 0; i < map->capacity; i++)
+    for (size_t i = 0; i < G.cap; i++)
     {
-        free(map->slots[i].word);
-    }
-    free(map->slots);
-    map->slots = NULL;
-    map->capacity = 0;
-    map->mask = 0;
-    map->size = 0;
-    map->total = 0;
-    map->threshold = 0;
-}
-
-static int hash_map_resize(HashMap *map, size_t new_capacity)
-{
-    size_t cap = next_power_of_two(new_capacity);
-    Entry *slots = calloc(cap, sizeof *slots);
-    if (!slots)
-        return -1;
-
-    size_t mask = cap - 1;
-
-    for (size_t i = 0; i < map->capacity; i++)
-    {
-        Entry old = map->slots[i];
-        if (!old.word)
-            continue;
-
-        size_t idx = old.hash & mask;
-        while (slots[idx].word)
-            idx = (idx + 1) & mask;
-        slots[idx] = old;
-    }
-
-    free(map->slots);
-    map->slots = slots;
-    map->capacity = cap;
-    map->mask = mask;
-
-    const double load_factor = 0.75;
-    map->threshold = (size_t)(cap * load_factor);
-
-    return 0;
-}
-
-static char *dup_word(const char *word, size_t len)
-{
-    char *s = malloc(len + 1);
-    if (!s)
-        return NULL;
-    memcpy(s, word, len);
-    s[len] = '\0';
-    return s;
-}
-
-static int
-hash_map_upsert(HashMap *map, const char *word, size_t len, uint64_t hash)
-{
-    if (map->size >= map->threshold)
-        if (hash_map_resize(map, map->capacity * 2) < 0)
-            return -1;
-
-    size_t idx = hash & map->mask;
-
-    for (;;)
-    {
-        Entry *e = &map->slots[idx];
-
-        if (!e->word)
+        E *e = G.tab[i];
+        while (e)
         {
-            e->hash = hash;
-            e->count = 1;
-            e->word = dup_word(word, len);
-            if (!e->word)
-                return -1;
-
-            map->size++;
-            map->total++;
-            return 0;
+            E *next = e->next;
+            size_t idx = e->h & (newcap - 1);
+            e->next = newtab[idx];
+            newtab[idx] = e;
+            e = next;
         }
-
-        if (e->hash == hash && strcmp(e->word, word) == 0)
-        {
-            e->count++;
-            map->total++;
-            return 0;
-        }
-
-        idx = (idx + 1) & map->mask;
     }
+    free(G.tab);
+    G.tab = newtab;
+    G.cap = newcap;
 }
 
-/* ------------------------------------------------------------------------- */
-/* Word Scanning                                                             */
-/* ------------------------------------------------------------------------- */
-
-static int count_words(HashMap *map, const char *data, size_t length)
+static void add(const char *w, size_t len, size_t h)
 {
-    const char *p = data;
-    const char *end = data + length;
-    char buf[MAX_WORD];
+    if (G.n >= G.cap * 7 / 10)
+        grow();
 
-    while (p < end)
+    size_t idx = h & (G.cap - 1);
+    for (E *e = G.tab[idx]; e; e = e->next)
     {
-        /* Skip non-letters */
-        while (p < end && !is_letter_ascii((unsigned char)*p))
-            p++;
+        if (e->h == h && !memcmp(e->w, w, len) && !e->w[len])
+        {
+            e->cnt++;
+            G.tot++;
+            return;
+        }
+    }
 
-        if (p >= end)
+    E *e = malloc(sizeof(E) + len + 1);
+    if (!e)
+        die("out of memory");
+    memcpy(e->w, w, len);
+    e->w[len] = '\0';
+    e->h = h;
+    e->cnt = 1;
+    e->next = G.tab[idx];
+    G.tab[idx] = e;
+    G.n++;
+    G.tot++;
+}
+
+/* --- scan --- */
+
+static void scan(void)
+{
+    const unsigned char *s = (const unsigned char *)G.mem;
+    const unsigned char *end = s + G.len;
+    char buf[256];
+
+    while (s < end)
+    {
+        while (s < end && !alpha(*s))
+            s++;
+        if (s >= end)
             break;
 
-        char *out = buf;
-        uint64_t hash = FNV_OFFSET;
-
-        while (p < end && is_letter_ascii((unsigned char)*p))
+        size_t h = SEED;
+        size_t n = 0;
+        while (s < end && alpha(*s))
         {
-            unsigned char c = to_lower_ascii((unsigned char)*p);
-            if ((size_t)(out - buf) < MAX_WORD - 1)
-                *out++ = (char)c;
-
-            hash ^= c;
-            hash *= FNV_PRIME;
-            p++;
+            unsigned c = *s++ | 32;
+            if (n < sizeof(buf) - 1)
+                buf[n++] = c;
+            h = (h ^ c) * MUL;
         }
-
-        size_t len = (size_t)(out - buf);
-        if (len == 0)
-            continue;
-
-        buf[len] = '\0';
-
-        if (hash_map_upsert(map, buf, len, hash) < 0)
-            return -1;
+        add(buf, n, h);
     }
-
-    return 0;
 }
 
-/* ------------------------------------------------------------------------- */
-/* Sorting and Output                                                        */
-/* ------------------------------------------------------------------------- */
+/* --- output --- */
 
-static int cmp_entry_desc(const void *a, const void *b)
+static int cmp(const void *a, const void *b)
 {
-    const Entry *ea = a;
-    const Entry *eb = b;
-
-    if (ea->count < eb->count)
-        return 1;
-    if (ea->count > eb->count)
-        return -1;
-    return strcmp(ea->word, eb->word);
+    const E *x = *(const E **)a;
+    const E *y = *(const E **)b;
+    if (x->cnt != y->cnt)
+        return x->cnt < y->cnt ? 1 : -1;
+    return strcmp(x->w, y->w);
 }
 
-static Entry *collect_entries(const HashMap *map, size_t *out_count)
+static void output(void)
 {
-    if (!map || !out_count)
-        return NULL;
-
-    if (map->size == 0)
-    {
-        *out_count = 0;
-        return NULL;
-    }
-
-    Entry *dense = malloc(map->size * sizeof *dense);
-    if (!dense)
-        return NULL;
+    E **arr = malloc(G.n * sizeof(E *));
+    if (!arr)
+        die("out of memory");
 
     size_t j = 0;
-    for (size_t i = 0; i < map->capacity; i++)
-    {
-        if (!map->slots[i].word)
-            continue;
-        dense[j++] = map->slots[i];
-    }
+    for (size_t i = 0; i < G.cap; i++)
+        for (E *e = G.tab[i]; e; e = e->next)
+            arr[j++] = e;
 
-    *out_count = j;
-    return dense;
+    qsort(arr, G.n, sizeof(E *), cmp);
+
+    size_t top = G.n < 10 ? G.n : 10;
+    printf("\n%7s  %-20s  %s\n", "count", "word", "%%");
+    printf("-------  --------------------  ------\n");
+    for (size_t i = 0; i < top; i++)
+    {
+        E *e = arr[i];
+        printf("%7zu  %-20s  %5.2f\n", e->cnt, e->w, 100.0 * e->cnt / G.tot);
+    }
+    printf("\ntotal: %zu words, %zu unique\n", G.tot, G.n);
+    free(arr);
 }
 
-static void print_results(const HashMap *map)
-{
-    if (!map || map->size == 0)
-    {
-        puts("No words found.");
-        return;
-    }
-
-    size_t n_entries = 0;
-    Entry *dense = collect_entries(map, &n_entries);
-    if (!dense)
-        die_msg("out of memory while collecting entries");
-
-    qsort(dense, n_entries, sizeof *dense, cmp_entry_desc);
-
-    printf("\n%7s %-16s %s\n", "Count", "Word", "%");
-    printf("------- ---------------- -----\n");
-
-    size_t limit = (n_entries < TOP_N) ? n_entries : TOP_N;
-    for (size_t i = 0; i < limit; i++)
-    {
-        const Entry *e = &dense[i];
-        double pct = (map->total == 0)
-                             ? 0.0
-                             : (100.0 * (double)e->count / (double)map->total);
-
-        printf("%7zu %-16s %.2f\n", e->count, e->word, pct);
-    }
-
-    printf("\nTotal: %zu words, %zu unique\n", map->total, map->size);
-
-    free(dense);
-}
-
-/* ------------------------------------------------------------------------- */
-/* Main                                                                      */
-/* ------------------------------------------------------------------------- */
+/* --- main --- */
 
 int main(int argc, char **argv)
 {
     if (argc != 2)
     {
         (void)fprintf(stderr, "usage: %s <file>\n", argv[0]);
-        return EXIT_FAILURE;
+        return 1;
     }
 
-    const char *path = argv[1];
-    int fd = -1;
-    void *map_addr = MAP_FAILED;
-    size_t size = 0;
-    HashMap map = { 0 };
-    int rc = EXIT_FAILURE;
+    G.fd = open(argv[1], O_RDONLY);
+    if (G.fd < 0)
+        die("cannot open file");
 
     struct stat st;
-
-    if ((fd = open(path, O_RDONLY)) < 0)
-    {
-        perror("open");
-        goto out;
-    }
-
-    if (fstat(fd, &st) < 0)
-    {
-        perror("fstat");
-        goto out;
-    }
-
+    if (fstat(G.fd, &st) < 0)
+        die("cannot stat file");
     if (st.st_size == 0)
     {
-        puts("Empty file.");
-        rc = EXIT_SUCCESS;
-        goto out;
+        puts("empty file");
+        return 0;
     }
 
-    size = (size_t)st.st_size;
+    G.len = st.st_size;
+    G.mem = mmap(NULL, G.len, PROT_READ, MAP_PRIVATE, G.fd, 0);
+    if (G.mem == MAP_FAILED)
+        die("cannot mmap file");
 
-    map_addr = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (map_addr == MAP_FAILED)
-    {
-        perror("mmap");
-        goto out;
-    }
+    scan();
+    if (G.n > 0)
+        output();
 
-    (void)posix_madvise(map_addr, size, POSIX_MADV_SEQUENTIAL);
-
-    if (hash_map_init(&map, INITIAL_CAPACITY) < 0)
-    {
-        (void)fputs("out of memory initializing hash map\n", stderr);
-        goto out;
-    }
-
-    if (count_words(&map, map_addr, size) < 0)
-    {
-        (void)fputs("out of memory while counting words\n", stderr);
-        goto out;
-    }
-
-    print_results(&map);
-    rc = EXIT_SUCCESS;
-
-out:
-    hash_map_destroy(&map);
-
-    if (map_addr != MAP_FAILED)
-        munmap(map_addr, size);
-
-    if (fd >= 0)
-        close(fd);
-
-    return rc;
+    munmap(G.mem, G.len);
+    close(G.fd);
+    return 0;
 }

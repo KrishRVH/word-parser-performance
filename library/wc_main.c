@@ -1,379 +1,491 @@
-/**
- * @file wc_main.c
- * @brief Command-line wrapper for the wordcount library.
- *
- * A small, portable word-frequency tool intended as a reference example
- * for how to build a clean C99 CLI around a reusable library.
- *
- * Usage:
- *   wc [file ...]
- *
- * Behavior:
- *   - If one or more file names are given, each file is opened in binary
- *     mode ("rb"), read in its entirety into memory, and processed.
- *   - If no files are specified, stdin is read instead.
- *   - The program then prints all words and their counts to stdout,
- *     sorted by:
- *         1. descending count,
- *         2. ascending lexicographic order for ties.
- *   - Finally a summary (total and unique word counts) is printed to
- *     stderr.
- *
- * Notes:
- *   - Files are read completely into memory before processing. This
- *     keeps the example simple and correct with respect to word
- *     boundaries (no chunk-splitting across calls).
- *   - For very large inputs, a streaming-aware caller would be more
- *     appropriate; see the library documentation for details.
- *
- * Build example (GCC or Clang):
- *
- *   gcc -std=c99 -Wall -Wextra -pedantic \
- *       wordcount.c wc_main.c -o wc
- */
+/*
+** wc_main.c - Command-line interface
+**
+** Public domain.
+**
+** DESIGN
+**
+**   Uses memory-mapped I/O for zero-copy file access, enabling
+**   processing of files larger than physical RAM. Platform-specific
+**   code is isolated in the os_* functions.
+**
+**   Error handling follows the goto-cleanup canonical pattern
+**   from Linux kernel and SQLite style guides.
+**
+** Usage: wc [file ...]
+** Reads stdin if no files given. Top 10 to stdout, summary to stderr.
+*/
 
 #include "wordcount.h"
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include <errno.h>  /* errno */
-#include <stdio.h>  /* FILE, fopen, fclose, fread, printf, fprintf */
-#include <stdlib.h> /* malloc, realloc, free, EXIT_SUCCESS, EXIT_FAILURE */
-#include <string.h> /* strerror */
+#define TOPN 10
+#define STDIN_CHUNK 65536
 
-/*===========================================================================
- * Configuration
- *===========================================================================*/
+/* --- Overflow-safe arithmetic --- */
+
+static int add_overflows_sz(size_t a, size_t b)
+{
+    return a > SIZE_MAX - b;
+}
+
+/* --- Platform abstraction for memory-mapped files --- */
+
+#ifdef _WIN32
 
 /*
- * Size of each read chunk when loading a file or stdin.
- * A power-of-two buffer size is a reasonable default for most systems.
- */
-enum
+** Windows implementation using CreateFileMapping.
+*/
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+typedef struct
 {
-    WC_READ_CHUNK_SIZE = 65536
-};
+    void *data;
+    size_t size;
+    HANDLE hFile;
+    HANDLE hMap;
+} MappedFile;
 
 /*
- * How many of the most frequent words to print.
- * A value of 0 means "print all".
- */
-enum
+** Map Win32 error to errno. Uses _dosmaperr if available (MSVC/UCRT),
+** otherwise falls back to EIO.
+*/
+static void set_errno_from_win32(void)
 {
-    WC_TOP_N = 0
-};
-
-/*
- * Application-specific exit codes.
- * EXIT_FAILURE is used for generic failures; EXIT_SUCCESS for success.
- * EXIT_ERROR is separated only to make the intent explicit.
- */
-enum
-{
-    WC_EXIT_OK = 0,
-    WC_EXIT_ERROR = 2
-};
-
-/*===========================================================================
- * Error reporting helpers
- *===========================================================================*/
-
-/**
- * @brief Print an error message to stderr in a consistent format.
- *
- * @param context  Optional context string (filename, etc.), or NULL.
- * @param message  NUL-terminated error message string.
- */
-static void wc_report_error(const char *context, const char *message)
-{
-    if (context != NULL && context[0] != '\0')
+    DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
     {
-        (void)fprintf(stderr, "wc: %s: %s\n", context, message);
+        errno = ENOENT;
+    }
+    else if (err == ERROR_ACCESS_DENIED)
+    {
+        errno = EACCES;
+    }
+    else if (err == ERROR_NOT_ENOUGH_MEMORY || err == ERROR_OUTOFMEMORY)
+    {
+        errno = ENOMEM;
     }
     else
     {
-        (void)fprintf(stderr, "wc: %s\n", message);
+        errno = EIO;
     }
 }
 
-/**
- * @brief Convert a wc_status code to a human-readable string.
- *
- * The returned pointer refers to a static string and must not be freed.
- */
-static const char *wc_status_message(wc_status st)
+static int os_map(MappedFile *mf, const char *path)
 {
-    switch (st)
+    LARGE_INTEGER sz;
+
+    memset(mf, 0, sizeof *mf);
+    mf->hFile = INVALID_HANDLE_VALUE;
+    mf->hMap = NULL;
+
+    mf->hFile = CreateFileA(path,
+                            GENERIC_READ,
+                            FILE_SHARE_READ,
+                            NULL,
+                            OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL,
+                            NULL);
+    if (mf->hFile == INVALID_HANDLE_VALUE)
     {
-        case WC_OK:
-            return "success";
-        case WC_ERR_INVALID_ARGUMENT:
-            return "invalid argument";
-        case WC_ERR_OUT_OF_MEMORY:
-            return "out of memory";
-        default:
-            return "unknown error";
+        set_errno_from_win32();
+        return -1;
     }
+
+    if (!GetFileSizeEx(mf->hFile, &sz))
+    {
+        set_errno_from_win32();
+        CloseHandle(mf->hFile);
+        mf->hFile = INVALID_HANDLE_VALUE;
+        return -1;
+    }
+
+    if (sz.QuadPart == 0)
+    {
+        CloseHandle(mf->hFile);
+        mf->hFile = INVALID_HANDLE_VALUE;
+        return 0; /* empty file is ok */
+    }
+
+    /* Reject files larger than size_t can represent */
+    if (sz.QuadPart < 0 ||
+        (unsigned long long)sz.QuadPart > (unsigned long long)SIZE_MAX)
+    {
+        CloseHandle(mf->hFile);
+        mf->hFile = INVALID_HANDLE_VALUE;
+        errno = EFBIG;
+        return -1;
+    }
+
+    mf->hMap = CreateFileMappingA(mf->hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mf->hMap)
+    {
+        set_errno_from_win32();
+        CloseHandle(mf->hFile);
+        mf->hFile = INVALID_HANDLE_VALUE;
+        return -1;
+    }
+
+    mf->data = MapViewOfFile(mf->hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!mf->data)
+    {
+        set_errno_from_win32();
+        CloseHandle(mf->hMap);
+        CloseHandle(mf->hFile);
+        mf->hMap = NULL;
+        mf->hFile = INVALID_HANDLE_VALUE;
+        return -1;
+    }
+
+    mf->size = (size_t)sz.QuadPart;
+    return 0;
 }
 
-/*===========================================================================
- * File / stream processing
- *===========================================================================*/
-
-/**
- * @brief Read an entire stream into a dynamically allocated buffer.
- *
- * @param fp        Open FILE* to read from (must not be NULL).
- * @param out_data  Output: pointer to allocated buffer, or NULL on success
- *                  with an empty stream.
- * @param out_len   Output: number of bytes read.
- *
- * @return 1 on success, 0 on error.
- *
- * On success:
- *   - If at least one byte was read, *out_data points to a buffer of at
- *     least *out_len bytes; the caller must free it with free().
- *   - If the stream is empty, *out_data is set to NULL and *out_len is 0.
- *
- * On failure:
- *   - Any allocated buffer is freed.
- *   - *out_data is set to NULL and *out_len is set to 0.
- *   - errno is left as set by the failing standard library call.
- */
-static int wc_read_entire_stream(FILE *fp, char **out_data, size_t *out_len)
+static void os_unmap(MappedFile *mf)
 {
-    char *buffer = NULL;
-    size_t capacity = 0U;
-    size_t length = 0U;
+    if (mf->data)
+        UnmapViewOfFile(mf->data);
+    if (mf->hMap)
+        CloseHandle(mf->hMap);
+    if (mf->hFile != INVALID_HANDLE_VALUE)
+        CloseHandle(mf->hFile);
+    memset(mf, 0, sizeof *mf);
+    mf->hFile = INVALID_HANDLE_VALUE;
+}
+
+#else
+
+/*
+** POSIX implementation using mmap.
+*/
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+typedef struct
+{
+    void *data;
+    size_t size;
+    int fd;
+} MappedFile;
+
+static int os_map(MappedFile *mf, const char *path)
+{
+    struct stat st;
+    int saved_errno;
+
+    memset(mf, 0, sizeof *mf);
+    mf->fd = -1;
+
+    mf->fd = open(path, O_RDONLY);
+    if (mf->fd < 0)
+        return -1;
+
+    if (fstat(mf->fd, &st) < 0)
+    {
+        saved_errno = errno;
+        close(mf->fd);
+        mf->fd = -1;
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (st.st_size == 0)
+    {
+        close(mf->fd);
+        mf->fd = -1;
+        return 0; /* empty file is ok */
+    }
+
+    /* Reject files larger than size_t can represent (32-bit builds) */
+    if ((off_t)(size_t)st.st_size != st.st_size)
+    {
+        close(mf->fd);
+        mf->fd = -1;
+        errno = EFBIG;
+        return -1;
+    }
+
+    mf->data =
+            mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, mf->fd, 0);
+    if (mf->data == MAP_FAILED)
+    {
+        saved_errno = errno;
+        mf->data = NULL;
+        close(mf->fd);
+        mf->fd = -1;
+        errno = saved_errno;
+        return -1;
+    }
+
+#ifdef MADV_SEQUENTIAL
+    madvise(mf->data, (size_t)st.st_size, MADV_SEQUENTIAL);
+#endif
+
+    mf->size = (size_t)st.st_size;
+    return 0;
+}
+
+static void os_unmap(MappedFile *mf)
+{
+    if (mf->data && mf->size > 0)
+    {
+        munmap(mf->data, mf->size);
+    }
+    if (mf->fd >= 0)
+        close(mf->fd);
+    memset(mf, 0, sizeof *mf);
+    mf->fd = -1;
+}
+
+#endif /* _WIN32 */
+
+/* --- Stdin handling (cannot mmap, must buffer) --- */
+
+static char *read_stdin(size_t *out)
+{
+    char *buf = NULL;
+    size_t cap = 0;
+    size_t len = 0;
+    size_t n;
+    int rc = -1;
+
+    *out = 0;
 
     for (;;)
     {
-        /* Grow the buffer if there is not enough room for the next chunk. */
-        if (length + WC_READ_CHUNK_SIZE > capacity)
+        /* Guard against overflow before using len + STDIN_CHUNK */
+        if (add_overflows_sz(len, (size_t)STDIN_CHUNK))
         {
-            size_t new_capacity;
+            errno = ENOMEM;
+            goto cleanup;
+        }
 
-            if (capacity == 0U)
+        if (len + (size_t)STDIN_CHUNK > cap)
+        {
+            size_t nc;
+            char *p;
+
+            if (cap == 0)
             {
-                new_capacity = WC_READ_CHUNK_SIZE;
+                nc = (size_t)STDIN_CHUNK;
+            }
+            else if (cap > SIZE_MAX / 2)
+            {
+                errno = ENOMEM;
+                goto cleanup;
             }
             else
             {
-                new_capacity = capacity * 2U;
+                nc = cap * 2;
             }
 
-            /* Very simple overflow check when doubling. */
-            if (new_capacity < capacity)
-            {
-                free(buffer);
-                *out_data = NULL;
-                *out_len = 0U;
-                errno = ENOMEM;
-                return 0;
-            }
-
-            char *new_buffer = (char *)realloc(buffer, new_capacity);
-            if (new_buffer == NULL)
-            {
-                free(buffer);
-                *out_data = NULL;
-                *out_len = 0U;
-                /* errno is assumed to be set by realloc implementation. */
-                return 0;
-            }
-
-            buffer = new_buffer;
-            capacity = new_capacity;
+            p = realloc(buf, nc);
+            if (!p)
+                goto cleanup;
+            buf = p;
+            cap = nc;
         }
 
-        /* Read up to WC_READ_CHUNK_SIZE bytes at a time. */
-        const size_t nread = fread(buffer + length, 1U, WC_READ_CHUNK_SIZE, fp);
-        length += nread;
+        n = fread(buf + len, 1, STDIN_CHUNK, stdin);
+        len += n;
 
-        if (nread < (size_t)WC_READ_CHUNK_SIZE)
+        if (n < STDIN_CHUNK)
         {
-            if (ferror(fp))
-            {
-                free(buffer);
-                *out_data = NULL;
-                *out_len = 0U;
-                /* errno is set by the underlying I/O error. */
-                return 0;
-            }
-            /* feof(fp) is true here: end-of-file reached. */
-            break;
+            if (ferror(stdin))
+                goto cleanup;
+            break; /* EOF */
         }
     }
 
-    if (length == 0U)
-    {
-        free(buffer);
-        *out_data = NULL;
-        *out_len = 0U;
-    }
-    else
-    {
-        *out_data = buffer;
-        *out_len = length;
-    }
+    if (len == 0)
+        goto cleanup;
 
-    return 1;
+    rc = 0;
+    *out = len;
+
+cleanup:
+    if (rc < 0)
+    {
+        free(buf);
+        return NULL;
+    }
+    return buf;
 }
 
-/**
- * @brief Process a single stream and add words to the table.
- *
- * Reads the entire stream into memory, then processes it as a single unit
- * with wc_process_text(), ensuring that words split across chunk
- * boundaries are handled correctly.
- *
- * @param t         Word-count table (must not be NULL).
- * @param fp        Open FILE* to read from (must not be NULL).
- * @param label     Context label for error messages (e.g., filename).
- *
- * @return WC_OK on success, or a wc_status error code on failure.
- */
-static wc_status wc_process_stream(wc_table *t, FILE *fp, const char *label)
+/* --- Processing --- */
+
+static int
+process_mapped(wc *w, const char *data, size_t size, const char *name)
+{
+    int rc;
+
+    rc = wc_scan(w, data, size);
+    if (rc == WC_NOMEM)
+    {
+        (void)fprintf(stderr, "wc: %s: out of memory\n", name);
+        return -1;
+    }
+    if (rc != WC_OK)
+    {
+        (void)fprintf(stderr, "wc: %s: scan error\n", name);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int process_file(wc *w, const char *path)
+{
+    MappedFile mf;
+    int rc = -1;
+
+    memset(&mf, 0, sizeof mf);
+#ifdef _WIN32
+    mf.hFile = INVALID_HANDLE_VALUE;
+#else
+    mf.fd = -1;
+#endif
+
+    if (os_map(&mf, path) < 0)
+    {
+        (void)fprintf(stderr, "wc: %s: %s\n", path, strerror(errno));
+        goto cleanup;
+    }
+
+    if (mf.size == 0)
+    {
+        rc = 0;
+        goto cleanup;
+    }
+
+    rc = process_mapped(w, mf.data, mf.size, path);
+
+cleanup:
+    os_unmap(&mf);
+    return rc;
+}
+
+static int process_stdin(wc *w)
 {
     char *data = NULL;
-    size_t len = 0U;
+    size_t len = 0;
+    int rc = -1;
 
-    if (!wc_read_entire_stream(fp, &data, &len))
+    errno = 0;
+    data = read_stdin(&len);
+    if (!data)
     {
-        /*
-         * Could be I/O error or out-of-memory. We report strerror(errno)
-         * for the caller's benefit, but always translate it to a generic
-         * wc_status for simplicity.
-         */
-        wc_report_error(label, strerror(errno));
-        return WC_ERR_OUT_OF_MEMORY;
-    }
-
-    wc_status result = WC_OK;
-
-    if (len > 0U)
-    {
-        result = wc_process_text(t, data, len);
-        if (result != WC_OK)
+        if (errno == 0 && len == 0)
         {
-            wc_report_error(label, wc_status_message(result));
+            rc = 0;
+            goto cleanup;
         }
+        if (errno)
+        {
+            (void)fprintf(stderr, "wc: <stdin>: %s\n", strerror(errno));
+        }
+        else
+        {
+            (void)fprintf(stderr, "wc: <stdin>: read error\n");
+        }
+        goto cleanup;
     }
 
+    rc = process_mapped(w, data, len, "<stdin>");
+
+cleanup:
     free(data);
-    return result;
+    return rc;
 }
 
-/*===========================================================================
- * Output formatting
- *===========================================================================*/
+/* --- Output --- */
 
-/**
- * @brief Print word frequencies to stdout.
- *
- * @param entries  Array of word-count entries (may be NULL if count is 0).
- * @param count    Number of entries in the array.
- * @param limit    Maximum number of entries to print (0 = print all).
- */
-static void
-wc_print_results(const wc_entry *entries, size_t count, size_t limit)
+static void output(const wc *w)
 {
-    size_t to_print = count;
+    wc_word *words = NULL;
+    size_t len = 0;
+    size_t i;
+    size_t n;
+    int rc;
 
-    if (limit > 0U && limit < count)
+    rc = wc_results(w, &words, &len);
+    if (rc == WC_NOMEM)
     {
-        to_print = limit;
+        (void)fprintf(stderr, "wc: out of memory\n");
+        goto cleanup;
+    }
+    if (rc != WC_OK)
+    {
+        (void)fprintf(stderr, "wc: error retrieving results\n");
+        goto cleanup;
     }
 
-    for (size_t i = 0U; i < to_print; ++i)
+    if (len == 0)
     {
-        (void)printf("%7zu %s\n", entries[i].count, entries[i].word);
+        (void)fprintf(stderr, "No words found.\n");
+        goto cleanup;
     }
-}
 
-/**
- * @brief Print summary statistics to stderr.
- *
- * @param t  Word-count table (must not be NULL).
- */
-static void wc_print_summary(const wc_table *t)
-{
-    (void)fprintf(stderr,
-                  "\nTotal words: %zu, Unique words: %zu\n",
-                  wc_total_words(t),
-                  wc_unique_words(t));
-}
+    n = len < TOPN ? len : TOPN;
+    printf("\n%7s  %-20s  %s\n", "Count", "Word", "%");
+    printf("-------  --------------------  ------\n");
 
-/*===========================================================================
- * Program entry point
- *===========================================================================*/
-
-int main(int argc, char *argv[])
-{
-    int exit_code = WC_EXIT_OK;
-
-    /* Create word-count table with default configuration. */
-    wc_table *table = wc_create(NULL);
-    if (table == NULL)
+    for (i = 0; i < n; i++)
     {
-        wc_report_error(NULL, "failed to create word table (out of memory)");
-        return WC_EXIT_ERROR;
+        double pct = 100.0 * (double)words[i].count / (double)wc_total(w);
+        printf("%7zu  %-20s  %5.2f\n", words[i].count, words[i].word, pct);
+    }
+
+    (void)fprintf(
+            stderr, "\nTotal: %zu  Unique: %zu\n", wc_total(w), wc_unique(w));
+
+cleanup:
+    wc_results_free(words);
+}
+
+/* --- Main --- */
+
+int main(int argc, char **argv)
+{
+    wc *w = NULL;
+    int i;
+    int err = 0;
+    int rc = 1;
+
+    w = wc_open(0);
+    if (!w)
+    {
+        (void)fprintf(stderr, "wc: out of memory\n");
+        goto cleanup;
     }
 
     if (argc < 2)
     {
-        /* No file arguments: process stdin. */
-        const wc_status st = wc_process_stream(table, stdin, "<stdin>");
-        if (st != WC_OK)
-        {
-            exit_code = WC_EXIT_ERROR;
-        }
+        if (process_stdin(w) < 0)
+            err = 1;
     }
     else
     {
-        /* Process each file specified on the command line. */
-        for (int i = 1; i < argc; ++i)
+        for (i = 1; i < argc; i++)
         {
-            const char *filename = argv[i];
-
-            FILE *fp = fopen(filename, "rb");
-            if (fp == NULL)
-            {
-                wc_report_error(filename, strerror(errno));
-                exit_code = WC_EXIT_ERROR;
-                continue;
-            }
-
-            const wc_status st = wc_process_stream(table, fp, filename);
-            (void)fclose(fp);
-
-            if (st != WC_OK)
-            {
-                exit_code = WC_EXIT_ERROR;
-            }
+            if (process_file(w, argv[i]) < 0)
+                err = 1;
         }
     }
 
-    /* If any words were processed, print results and a summary. */
-    if (wc_unique_words(table) > 0U)
-    {
-        wc_entry *entries = NULL;
-        size_t count = 0U;
+    if (wc_unique(w) > 0)
+        output(w);
 
-        const wc_status st = wc_snapshot(table, &entries, &count);
-        if (st == WC_OK)
-        {
-            wc_print_results(entries, count, WC_TOP_N);
-            wc_free_snapshot(entries);
-        }
-        else
-        {
-            wc_report_error(NULL, wc_status_message(st));
-            exit_code = WC_EXIT_ERROR;
-        }
+    rc = err ? 1 : 0;
 
-        wc_print_summary(table);
-    }
-
-    wc_destroy(table);
-
-    return exit_code;
+cleanup:
+    wc_close(w);
+    return rc;
 }
