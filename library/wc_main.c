@@ -31,6 +31,14 @@
 #define TOPN 10
 #define STDIN_CHUNK 65536
 
+/*
+** EFBIG is POSIX, not C99. Provide fallback for exotic toolchains.
+** ERANGE is C99-guaranteed and semantically closest.
+*/
+#ifndef EFBIG
+#define EFBIG ERANGE
+#endif
+
 /* --- Overflow-safe arithmetic --- */
 
 static int add_overflows_sz(size_t a, size_t b)
