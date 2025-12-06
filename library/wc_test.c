@@ -10,6 +10,7 @@
 **   - Edge cases and boundary conditions
 **   - OOM injection at every allocation point (SQLite-style torture test)
 **   - Regression tests for known bugs
+**   - Memory limit tuning via wc_limits / wc_open_ex
 **
 ** Build:
 **   cc -O0 -g wordcount.c wc_test.c -o wc_test
@@ -27,7 +28,7 @@
 **     -DWC_MALLOC=my_malloc -DWC_FREE=my_free
 **   and implement interposition in your test wrapper.
 */
-
+#ifndef WC_NO_TEST_MAIN
 #include "wordcount.h"
 #include <errno.h>
 #include <stdint.h>
@@ -159,7 +160,7 @@ OOM_UNUSED static void oom_arm(int n)
 #endif
 
 /* ================================================================
-** LIFECYCLE TESTS
+** LIFECYCLE / LIMITS TESTS
 ** ================================================================ */
 
 static int test_open_close(void)
@@ -192,6 +193,63 @@ static int test_max_word_clamp(void)
     wc_close(w);
     w = wc_open(9999);
     ASSERT(w != NULL);
+    wc_close(w);
+    PASS();
+    return 0;
+}
+
+static int test_open_ex_null_limits(void)
+{
+    wc *w;
+    TEST("open_ex NULL limits");
+    w = wc_open_ex(0, NULL);
+    ASSERT(w != NULL);
+    ASSERT(wc_total(w) == 0);
+    ASSERT(wc_unique(w) == 0);
+    wc_close(w);
+    PASS();
+    return 0;
+}
+
+static int test_open_ex_tiny_budget_fail(void)
+{
+    wc_limits lim;
+
+    TEST("open_ex tiny max_bytes fails");
+
+    memset(&lim, 0, sizeof lim);
+    lim.max_bytes = 1; /* far too small for internal structures */
+
+    ASSERT(wc_open_ex(0, &lim) == NULL);
+
+    PASS();
+    return 0;
+}
+
+static int test_limits_budget_enforced(void)
+{
+    wc_limits lim;
+    size_t i;
+    char word[32];
+    int rc;
+
+    TEST("limits enforce max_bytes");
+
+    memset(&lim, 0, sizeof lim);
+    lim.max_bytes = 4096; /* small but usable budget */
+
+    wc *const w = wc_open_ex(0, &lim);
+    ASSERT(w != NULL);
+
+    rc = WC_OK;
+    for (i = 0; i < 100000 && rc == WC_OK; i++)
+    {
+        (void)snprintf(word, sizeof word, "w%zu", i);
+        rc = wc_add(w, word);
+        ASSERT(rc == WC_OK || rc == WC_NOMEM);
+    }
+
+    ASSERT(rc == WC_NOMEM || i == 100000);
     wc_close(w);
     PASS();
     return 0;
@@ -748,6 +806,8 @@ static int test_oom_results(void)
         oom_reset();
         if (rc == WC_OK)
             wc_results_free(r);
+        else
+            ASSERT(rc == WC_NOMEM);
         wc_close(w);
     }
     PASS();
@@ -828,10 +888,13 @@ int main(void)
 {
     printf("\n=== Wordcount Tests (v%s) ===\n\n", wc_version());
 
-    printf("Lifecycle:\n");
+    printf("Lifecycle / Limits:\n");
     test_open_close();
     test_close_null();
     test_max_word_clamp();
+    test_open_ex_null_limits();
+    test_open_ex_tiny_budget_fail();
+    test_limits_budget_enforced();
 
     printf("\nwc_add:\n");
     test_add_single();
@@ -891,3 +954,4 @@ int main(void)
 
     return g_fail ? 1 : 0;
 }
+#endif

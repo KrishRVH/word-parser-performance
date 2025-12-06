@@ -14,12 +14,18 @@
 **
 ** Usage: wc [file ...]
 ** Reads stdin if no files given. Top 10 to stdout, summary to stderr.
+**
+** Environment:
+**   WC_MAX_BYTES  - Optional soft cap on internal heap usage for
+**                   the wc object, in bytes (e.g. "8388608" for 8MB).
+**                   If unset or invalid, defaults to no explicit cap.
 */
-
+#ifndef WC_NO_HOSTED_MAIN
 #include "wordcount.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TOPN 10
@@ -30,6 +36,36 @@
 static int add_overflows_sz(size_t a, size_t b)
 {
     return a > SIZE_MAX - b;
+}
+
+/* --- Parse environment-based limits --- */
+
+static int parse_wc_limits_from_env(wc_limits *lim)
+{
+    const char *env;
+    char *end;
+    unsigned long long v;
+
+    if (!lim)
+        return 0;
+
+    memset(lim, 0, sizeof *lim);
+
+    env = getenv("WC_MAX_BYTES");
+    if (!env || !*env)
+        return 0; /* no limits */
+
+    errno = 0;
+    v = strtoull(env, &end, 10);
+    if (errno != 0 || end == env || *end != '\0')
+        return -1;
+
+    if (v > (unsigned long long)SIZE_MAX)
+        v = (unsigned long long)SIZE_MAX;
+
+    lim->max_bytes = (size_t)v;
+    /* init_cap/block_size left at 0 => library defaults */
+    return 1;
 }
 
 /* --- Platform abstraction for memory-mapped files --- */
@@ -258,7 +294,6 @@ static char *read_stdin(size_t *out)
 
     for (;;)
     {
-        /* Guard against overflow before using len + STDIN_CHUNK */
         if (add_overflows_sz(len, (size_t)STDIN_CHUNK))
         {
             errno = ENOMEM;
@@ -284,7 +319,7 @@ static char *read_stdin(size_t *out)
                 nc = cap * 2;
             }
 
-            p = realloc(buf, nc);
+            p = (char *)realloc(buf, nc);
             if (!p)
                 goto cleanup;
             buf = p;
@@ -363,7 +398,7 @@ static int process_file(wc *w, const char *path)
         goto cleanup;
     }
 
-    rc = process_mapped(w, mf.data, mf.size, path);
+    rc = process_mapped(w, (const char *)mf.data, mf.size, path);
 
 cleanup:
     os_unmap(&mf);
@@ -456,8 +491,26 @@ int main(int argc, char **argv)
     int i;
     int err = 0;
     int rc = 1;
+    wc_limits lim;
+    int have_limits;
 
-    w = wc_open(0);
+    have_limits = parse_wc_limits_from_env(&lim);
+    if (have_limits < 0)
+    {
+        (void)fprintf(stderr,
+                      "wc: invalid WC_MAX_BYTES value (must be integer)\n");
+        goto cleanup;
+    }
+
+    if (have_limits > 0)
+    {
+        w = wc_open_ex(0, &lim);
+    }
+    else
+    {
+        w = wc_open(0);
+    }
+
     if (!w)
     {
         (void)fprintf(stderr, "wc: %s\n", wc_errstr(WC_NOMEM));
@@ -487,3 +540,4 @@ cleanup:
     wc_close(w);
     return rc;
 }
+#endif

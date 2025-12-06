@@ -45,6 +45,12 @@
 **   WC_REALLOC may also be defined for client code; the core library
 **   currently uses only WC_MALLOC and WC_FREE internally.
 **
+**   For finer control, wc_open_ex() accepts a wc_limits struct that
+**   can bound total internal allocations for a wc instance and tune
+**   the initial hash table capacity and arena block size. This makes
+**   it practical to use on very small systems with fixed memory
+**   budgets.
+**
 ** BUILD CONFIGURATION
 **
 **   WC_OMIT_ASSERT  - Define to disable internal assertions (smaller
@@ -112,6 +118,63 @@ extern "C"
 typedef struct wc wc;
 
 /*
+** Default sizing for initial hash table capacity and arena block
+** size. These can be overridden at compile time by defining
+** WC_DEFAULT_INIT_CAP and/or WC_DEFAULT_BLOCK_SZ before including
+** this header. If not defined, they are derived from SIZE_MAX.
+*/
+#ifndef WC_DEFAULT_INIT_CAP
+#ifndef WC_DEFAULT_BLOCK_SZ
+#include <stdint.h> /* for SIZE_MAX */
+#if SIZE_MAX <= 65535u
+#define WC_DEFAULT_INIT_CAP 128u
+#define WC_DEFAULT_BLOCK_SZ 1024u
+#elif SIZE_MAX <= 4294967295u
+#define WC_DEFAULT_INIT_CAP 1024u
+#define WC_DEFAULT_BLOCK_SZ 16384u
+#else
+#define WC_DEFAULT_INIT_CAP 4096u
+#define WC_DEFAULT_BLOCK_SZ 65536u
+#endif
+#endif
+#endif
+
+/*
+** Optional per-instance memory and sizing limits.
+**
+**   max_bytes:
+**     Hard cap on total internal allocations for this wc object.
+**     The following pools are counted against this limit:
+**       - the hash table (Slot array and its growth)
+**       - the arena blocks used for word storage
+**       - the optional heap scan buffer when WC_STACK_BUFFER==0
+**
+**     The wc handle itself (the struct wc) and any arrays returned
+**     by wc_results() are NOT counted, since their lifetime and
+**     ownership are under the caller's control. 0 = unlimited.
+**
+**   init_cap:
+**     Initial hash table capacity (number of slots). Must be > 0.
+**     Rounded up to a power of two internally. 0 = library default
+**     chosen from WC_DEFAULT_INIT_CAP based on platform.
+**
+**   block_size:
+**     Arena block size in bytes. Acts as the typical allocation
+**     quantum for word storage. 0 = library default chosen from
+**     WC_DEFAULT_BLOCK_SZ based on platform.
+**
+** On small systems, set max_bytes to a fixed budget and leave the
+** others at 0 to let the library derive conservative values. On
+** larger systems, you can tune init_cap/block_size directly.
+*/
+typedef struct wc_limits
+{
+    size_t max_bytes;
+    size_t init_cap;
+    size_t block_size;
+} wc_limits;
+
+/*
 ** Result entry returned by wc_results().
 */
 typedef struct wc_word
@@ -121,7 +184,22 @@ typedef struct wc_word
 } wc_word;
 
 /*
-** Create a new word counter.
+** Create a new word counter with optional limits.
+**
+**   max_word: Maximum word length to store. 0 = default (64).
+**             Clamped to range [4, 1024].
+**
+**   limits:   Optional pointer to a wc_limits struct. May be NULL.
+**
+** Returns NULL on allocation failure or if the supplied limits are
+** impossible to satisfy (e.g., max_bytes too small for even minimal
+** internal structures).
+*/
+wc *wc_open_ex(size_t max_word, const wc_limits *limits);
+
+/*
+** Create a new word counter with default limits (no explicit memory
+** cap, platform-tuned defaults for table and arena sizes).
 **
 **   max_word: Maximum word length to store. 0 = default (64).
 **             Clamped to range [4, 1024].
@@ -166,6 +244,10 @@ size_t wc_unique(const wc *w);
 **
 ** Returns WC_OK, WC_ERROR (bad args), or WC_NOMEM.
 ** On empty results, *out=NULL and *n=0 with WC_OK return.
+**
+** Note: The temporary results array is allocated via WC_MALLOC and
+** is not counted against max_bytes in wc_limits, since its lifetime
+** is entirely under the caller's control.
 */
 int wc_results(const wc *restrict w,
                wc_word **restrict out,
