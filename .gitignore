@@ -1,8 +1,33 @@
-book*.txt
+# Build Systems
+/build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# .NET / C#
 WordCount.csproj
 bin/
 obj/
+
+# Language-specific binaries
+wordcount
 wordcount_c
+wordcount_hopt_t12
+wordcount_hopt_t6
 wordcount_go
 wordcount_rust
+wordcount_hopt
+wordcount_js
+wordcount_cs
+
+# IDE
 .idea/
+
+# Project artifacts
+book*.txt
+*_results.txt
+*.log

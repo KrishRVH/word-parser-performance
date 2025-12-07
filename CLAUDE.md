@@ -4,161 +4,259 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a word frequency counter performance benchmark comparing implementations across C, Rust, Go, C#, JavaScript, and PHP. The project focuses on optimizing text processing performance, with a hyperoptimized C implementation achieving 4.67 GB/s throughput using AVX-512 SIMD, CRC32C hashing, and parallel processing.
+This is a performance benchmark comparing word frequency counting implementations across multiple languages (C, Rust, Go, C#, JavaScript, PHP). The project focuses on demonstrating optimization techniques, particularly hardware-specific optimizations with AVX-512 and multi-threading.
 
-## Key Commands
+## Build Commands
 
-### Building All Implementations
+### C Implementations
+
 ```bash
-# Install all dependencies (Ubuntu/WSL2)
-./install-deps.sh
+# Reference C implementation (idiomatic, memory-mapped)
+gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops \
+    ./wordcount.c -o wordcount_c
 
-# Build C implementations
-gcc -O3 -march=native wordcount.c -o wordcount_c
-gcc -O3 -march=native -pthread wordcount_hyperopt.c -o wordcount_hopt -lm
+# C hyperopt (6-thread variant)
+gcc -O3 -march=native -pthread -DNUM_THREADS=6 \
+    wordcount_hyperopt.c -o wordcount_hopt_t6 -lm
 
-# Build Rust
-rustc -O wordcount.rs -o wordcount_rust
-# Or with full optimizations:
-RUSTFLAGS="-C target-cpu=native -C opt-level=3 -C lto=fat -C codegen-units=1" rustc wordcount.rs -o wordcount_rust_opt
+# C hyperopt (12-thread variant)
+gcc -O3 -march=native -pthread -DNUM_THREADS=12 \
+    wordcount_hyperopt.c -o wordcount_hopt_t12 -lm
 
-# Build Go
-go build -o wordcount_go wordcount.go
-
-# Build C# (.NET 8)
-dotnet build -c Release
+# For AMD Ryzen with GCC >= 14:
+gcc -O3 -march=znver5 -mtune=znver5 -mavx512f -mavx512bw -mavx512vl -msse4.2 \
+    -flto -fomit-frame-pointer -funroll-loops -pthread -DNUM_THREADS=6 \
+    wordcount_hyperopt.c -o wordcount_hopt_t6 -lm
 ```
 
-### Running Benchmarks
+### Other Languages
 
 ```bash
-# Quick benchmark (all languages, 3 runs)
-taskset -c 0-23 ./bench.sh --runs=3
-
-# Full benchmark (all languages, 10 runs)
-taskset -c 0-23 ./bench.sh --runs=10
-
-# Validation mode (ensures all implementations produce same results)
-taskset -c 0-23 ./bench.sh --validate --runs=3
-
-# C-only hyperoptimized benchmark (release mode)
-./bench_c.sh --hyperonly --large --runs=10 --pin=0-23
-
-# C-only with profiling and debugging
-./bench_c.sh -d --hyperonly --large --profile --events="cycles,instructions,cache-misses" --pin=0-23 --runs=3 --bundle
-
-# Thread count scanning for optimization
-./bench_c.sh --hyperonly --large --scan-threads=6,8,12,16 --runs=10 --pin=0-23
-```
-
-### Running Individual Implementations
-```bash
-# C implementations
-./wordcount_c book.txt
-./wordcount_hopt book.txt
-
 # Rust
+rustc -C opt-level=3 -C target-cpu=native -C lto=fat -C codegen-units=1 \
+    wordcount.rs -o wordcount_rust
+
+# Go
+go build -gcflags="-B" -ldflags="-s -w" -o wordcount_go wordcount.go
+
+# C# (.NET)
+dotnet build -c Release
+
+# JavaScript/Node.js - no build needed
+# PHP - no build needed
+```
+
+### CMake Build (library + tests)
+
+```bash
+mkdir -p build && cd build
+cmake ..
+make
+
+# Run tests
+ctest
+# or
+./wc_test
+```
+
+## Running Benchmarks
+
+### Quick Benchmark (All Languages)
+
+```bash
+# Standard benchmark with validation
+taskset -c 0-23 ./bench.sh --validate --runs=10
+
+# Benchmark only (no validation)
+taskset -c 0-23 ./bench.sh --runs=3
+```
+
+### C-Only Benchmark (Detailed Comparison)
+
+```bash
+# Quick comparison (reference vs hyperopt)
+./bench_c.sh --runs=5
+
+# Hyperopt only (skip reference)
+./bench_c.sh --hyperonly --runs=10
+
+# Test with large files (5x and 25x)
+./bench_c.sh --large --runs=10 --pin=0-23
+
+# Scan multiple thread counts
+./bench_c.sh --scan-threads=4,6,8,12 --pin=0-23
+
+# With validation output
+./bench_c.sh --validate --hyperonly --large
+```
+
+### Run Individual Implementations
+
+```bash
+./wordcount_c book.txt
+./wordcount_hopt_t6 book.txt
 ./wordcount_rust book.txt
-
-# Go (with GC disabled for better performance)
 GOGC=off ./wordcount_go book.txt
-
-# C#
 ./bin/Release/net8.0/WordCount book.txt
-
-# JavaScript
 node wordcount.js book.txt
-
-# PHP
 php wordcount.php book.txt
 ```
 
-## Architecture
+## Architecture Overview
 
-### File Structure
-- `wordcount.c` - Reference C implementation using FNV-1a hash
-- `wordcount_hyperopt.c` - Hyperoptimized C with AVX-512, CRC32C, parallel processing
-- `wordcount.rs` - Rust implementation with FNV HashMap
-- `wordcount.go` - Go implementation with 64KB buffer streaming
-- `WordCount.cs` - C# implementation with pre-sized dictionary
-- `wordcount.js` - JavaScript with direct buffer processing
-- `wordcount.php` - PHP using regex extraction
+### Word Definition Specification
 
-### Key Design Decisions
+**Critical**: This benchmark uses a strict ASCII-letter-only word definition, NOT `wc -w`'s whitespace-delimited definition.
 
-1. **Word Definition**: All implementations except PHP use byte-level processing (ASCII letters [a-zA-Z]). PHP uses regex word boundaries.
+- A word is a maximal run of ASCII letters only (`A-Z`, `a-z`)
+- All other bytes (digits, punctuation, non-ASCII) are separators
+- Case-insensitive: `"Apple"` == `"APPLE"` == `"apple"`
+- Example: `"it's"` → two words: `"it"`, `"s"` (apostrophe is separator)
 
-2. **Hash Table Strategy**: 
-   - C hyperopt: Open addressing with linear probing, 16-bit fingerprints
-   - C reference: Custom hash table with FNV-1a
-   - Others: Language-native hash maps
+### Implementation Approaches
 
-3. **Parallelization**: Only `wordcount_hyperopt.c` uses multi-threading (configurable, default 6 threads)
+**C Reference (`wordcount.c`)**:
+- Memory-mapped I/O with parallel processing
+- Per-thread hash tables with arena allocation
+- FNV-1a hashing
+- No shared mutable state in hot path
+- Cross-platform (Windows/POSIX via conditional compilation)
 
-4. **Memory Management**:
-   - C hyperopt: Per-thread memory pools (32MB pre-allocated)
-   - Streaming: C and Go use buffered streaming
-   - Full load: Rust, JS, C#, PHP load entire file
+**C Hyperopt (`wordcount_hyperopt.c`)**:
+- AVX-512 SIMD tokenization with scalar fallback
+- CRC32C hardware hashing (FNV-1a fallback)
+- Per-thread hash tables with arena pools
+- Configurable thread count via `-DNUM_THREADS=N`
+- V-Cache aware thread pinning for AMD Zen 4+
+- Huge page hints for performance
+- Open addressing hash table
+- Environment: `WORDCOUNT_SIMD=0` to disable SIMD
 
-### Performance Critical Paths
+**Other Languages**:
+- Rust: Byte-level processing, FNV HashMap, zero-copy strings
+- Go: 64KB buffer, byte-level scanning, `GOGC=off` required for performance
+- C#: Pre-sized dictionary, byte-level processing
+- JavaScript: Direct buffer processing with Node.js
+- PHP: Regex-based (`\b[a-z]+\b`), produces slightly different counts (-82 words)
 
-1. **AVX-512 Processing** (`wordcount_hyperopt.c`):
-   - `process_chunk_avx512()` - Processes 64 bytes per iteration
-   - Falls back to scalar for non-AVX-512 systems
+### Validation System
 
-2. **CRC32C Hashing** (`wordcount_hyperopt.c`):
-   - Hardware CRC32 instructions via SSE4.2
-   - Incremental computation during word extraction
+The benchmark includes cross-language validation:
+- C reference implementation is ground truth
+- All implementations must match on total/unique word counts
+- Top 10 words must be identical across implementations
+- Use `--validate` flag with bench scripts
 
-3. **V-Cache Optimization** (`wordcount_hyperopt.c`):
-   - Auto-detects AMD V-Cache topology
-   - Pins threads to optimal cores
+### Performance Characteristics
 
-## Test Files
-
-- `book.txt` - 5.3MB test file (~900K words)
-- `book2.txt` - 53MB test file (if present)
-- `book3.txt` - 261MB test file (if present)
-
-Use `--large` flag with `bench_c.sh` to test all three files.
-
-## Optimization Flags
-
-- **C Hyperopt**: `-O3 -march=native -pthread` (or `-march=znver5` with GCC 14+)
-- **C Reference**: `-O3 -march=native -flto`
-- **Rust**: `-C opt-level=3 -C target-cpu=native -C lto=fat`
-- **Go**: Build with standard flags, run with `GOGC=off`
-- **C#**: Release configuration
-- **JavaScript**: Run with `--max-old-space-size=4096` if needed
-- **PHP**: Ensure `opcache.jit=tracing` is enabled
-
-## Debugging and Profiling
-
-### C Implementation Debugging
-```bash
-# Build debug version with sanitizers
-gcc -g -O0 -fsanitize=address -DDEBUG wordcount.c -o wordcount_debug
-
-# Profile with perf
-perf stat -e cycles,instructions,cache-misses ./wordcount_hopt book.txt
-
-# Generate detailed debug bundle
-./bench_c.sh -d --profile --bundle
-```
-
-### Validation
-All implementations except PHP should produce exactly 928,012 words for `book.txt`. PHP produces 927,930 due to regex boundary differences.
-
-## Performance Targets
-
-- **C Hyperopt**: Target 3.0+ GB/s on large files (currently achieves 4.67 GB/s)
-- **Standard implementations**: Within 3x of C reference implementation
-- **Consistency**: Standard deviation < 5ms for small files
-
-## Thread Count Optimization
-
-For `wordcount_hyperopt.c`, optimal thread counts vary by file size:
+**Threading Sweet Spots**:
 - Small files (5.3MB): 6 threads optimal
 - Large files (261MB): 12 threads optimal
+- Platform: WSL2/Ubuntu on AMD Ryzen 9 9950X3D
 
-Use `--scan-threads` flag to find optimal configuration for your system.
+**Expected Results** (book.txt ~5.3MB):
+- C Hyperopt (6T): ~0.008s (baseline, 685 MB/s)
+- Rust: ~0.020s (2.9x slower)
+- C Reference: ~0.022s (3.1x slower)
+- Go: ~0.030s (4.3x slower)
+- PHP: ~0.051s (7.3x slower)
+- C#/.NET: ~0.090s (12.9x slower)
+- JavaScript: ~0.090s (12.9x slower)
+
+## Key Implementation Details
+
+### Hash Table Design
+
+**C Reference**: Chaining with separate allocations
+**C Hyperopt**: Open addressing with linear probing, 16-bit fingerprints
+
+### Thread Safety
+
+**C implementations**: Embarrassingly parallel - each thread has its own hash table, merged at end. No locks in hot path.
+
+### Memory Management
+
+**Arena Allocation**: Both C implementations use arena allocators to eliminate per-word allocation overhead. The hyperopt version includes overflow handling for when the arena exhausts.
+
+### SIMD Tokenization (Hyperopt)
+
+AVX-512 is used for parallel byte classification when available. Scalar fallback ensures portability. The SIMD path processes 64 bytes at a time, identifying word boundaries in parallel.
+
+### Platform Compatibility
+
+`wordcount.c` supports both Windows and POSIX via conditional compilation at the top of the file. Windows uses `CreateFileMapping`/`MapViewOfFile`, POSIX uses `mmap`.
+
+## Development Workflow
+
+### Testing Changes to C Implementations
+
+```bash
+# Compile and validate output matches reference
+gcc -O3 -march=native wordcount.c -o wordcount_test
+./wordcount_test book.txt > test_output.txt
+
+# Compare with reference
+gcc -O3 -march=native wordcount.c -o wordcount_ref
+./wordcount_ref book.txt > ref_output.txt
+diff test_output.txt ref_output.txt
+```
+
+### Debugging Performance
+
+```bash
+# Compile with debug symbols
+gcc -O3 -march=native -g wordcount_hyperopt.c -o wordcount_debug -pthread -lm
+
+# Profile with perf (Linux)
+perf record -e cycles,instructions,cache-misses ./wordcount_debug book.txt
+perf report
+
+# Run with address sanitizer
+gcc -O1 -g -fsanitize=address wordcount_hyperopt.c -o wordcount_asan -pthread -lm
+./wordcount_asan book.txt
+```
+
+### Quality Checks
+
+```bash
+# Use c-quality.sh for static analysis
+./c-quality.sh
+```
+
+## Common Pitfalls
+
+1. **Go requires `GOGC=off`**: Go's GC significantly impacts performance without this
+2. **PHP word count differs**: Uses `\b` regex boundaries, produces 927,930 words vs 928,012
+3. **Thread count tuning**: Optimal thread count depends on file size and CPU
+4. **CPU pinning matters**: Use `taskset` for consistent results
+5. **File size**: `wc -w` reports 901,325 words (whitespace-delimited), but benchmark spec requires 928,012 (ASCII-letter tokens)
+6. **Hyperopt thread count**: Must be set at compile time via `-DNUM_THREADS=N`
+
+## File Organization
+
+```
+.
+├── wordcount.c               # Reference C implementation (parallel, portable)
+├── wordcount_hyperopt.c      # Optimized C with AVX-512/CRC32C
+├── wordcount.{rs,go,js,php}  # Other language implementations
+├── WordCount.cs              # C# implementation
+├── bench.sh                  # Multi-language benchmark runner
+├── bench_c.sh                # C-only detailed benchmark
+├── c-quality.sh              # Static analysis script
+├── library/                  # C99 library implementation
+│   ├── wordcount.c           # Core library (C99, portable)
+│   ├── wc_main.c            # CLI wrapper
+│   ├── wc_test.c            # Unit tests
+│   └── research.md          # Design philosophy and patterns
+├── CMakeLists.txt           # Build configuration
+└── README.md                # Detailed documentation
+```
+
+## Notes for AI Assistants
+
+- When modifying C implementations, preserve the word definition spec exactly
+- Performance changes should be validated with `bench_c.sh --validate`
+- The hyperopt implementation is platform-specific (x86-64 with AVX-512); maintain scalar fallbacks
+- Cross-platform code should follow the pattern in `wordcount.c` (compile-time platform detection)
+- Thread counts are compile-time constants for hyperopt to enable better optimization
+- The research.md file contains detailed design philosophy from C masters - reference when making architectural decisions

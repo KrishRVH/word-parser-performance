@@ -1,573 +1,518 @@
 #!/bin/bash
-# bench_c.sh - C implementation comparison and optimization tool
+# bench_c.sh - C word counter benchmark tool
+# Compares: reference (wordcount.c), new hyperopt, and old hyperopt
+#
 # Usage:
-#   ./bench_c.sh --hyperonly --large --runs=10 --pin=0-23
-#   ./bench_c.sh --hyperonly --large --scan-threads=6,8,12,16 --runs=10 --pin=0-23
-#   ./bench_c.sh -d --hyperonly --large --profile \
-#     --events="cycles,instructions,cache-misses,LLC-loads,LLC-load-misses" \
-#     --pin=0-23 --runs=3 --bundle
+#   ./bench_c.sh                           # Full comparison
+#   ./bench_c.sh --hyperonly               # Skip reference
+#   ./bench_c.sh --large --runs=10         # Test with larger files
+#   ./bench_c.sh --scan-threads=4,6,8,12   # Test different thread counts
+#   ./bench_c.sh --pin=0-5                 # Pin to specific CPUs
 
 export LC_ALL=C LANG=C
 
+# Defaults
 NUM_RUNS=5
-DEBUG_MODE=0
-PROFILE_MODE=0
-VALIDATE_MODE=0
-THREAD_COUNT=""
-NO_CLEANUP=0
 HYPER_ONLY=0
 INPUT_FILE="book.txt"
-PERF_EVENTS="cycles,instructions,branches,branch-misses,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,LLC-loads,LLC-load-misses,dTLB-loads,dTLB-load-misses"
 PIN_MASK=""
-BUNDLE=0
 SCAN_THREADS=""
 LARGE_MODE=0
+NO_CLEANUP=0
+VALIDATE_MODE=0
 
+# File names
+REF_FILE="wordcount.c"
+HYPEROPT_FILE="wordcount_hyperopt.c"
+HYPEROPT_OLD_FILE="wordcount_hyperopt_old.c"
+
+# Parse arguments
 for arg in "$@"; do
     case $arg in
-        --runs=*) NUM_RUNS="${arg#*=}"; shift ;;
-        -d|--debug) DEBUG_MODE=1; shift ;;
-        --profile) PROFILE_MODE=1; shift ;;
-        --validate) VALIDATE_MODE=1; shift ;;
-        --threads=*) THREAD_COUNT="${arg#*=}"; shift ;;
-        --no-cleanup) NO_CLEANUP=1; shift ;;
-        --hyperonly) HYPER_ONLY=1; shift ;;
-        --file=*) INPUT_FILE="${arg#*=}"; shift ;;
-        --events=*) PERf_EVENTS="${arg#*=}"; PERF_EVENTS="$PERf_EVENTS"; shift ;;
-        --pin=*) PIN_MASK="${arg#*=}"; shift ;;
-        --bundle) BUNDLE=1; shift ;;
-        --scan-threads=*) SCAN_THREADS="${arg#*=}"; shift ;;
-        --large) LARGE_MODE=1; shift ;;
+        --runs=*)       NUM_RUNS="${arg#*=}" ;;
+        --hyperonly)    HYPER_ONLY=1 ;;
+        --file=*)       INPUT_FILE="${arg#*=}" ;;
+        --pin=*)        PIN_MASK="${arg#*=}" ;;
+        --scan-threads=*) SCAN_THREADS="${arg#*=}" ;;
+        --large)        LARGE_MODE=1 ;;
+        --no-cleanup)   NO_CLEANUP=1 ;;
+        --validate)     VALIDATE_MODE=1 ;;
         --help)
             cat <<EOF
-Usage: $0 [--runs=N] [-d|--debug] [--profile] [--validate] [--threads=N] [--hyperonly]
-          [--file=PATH] [--events=LIST] [--pin=MASK] [--bundle] [--scan-threads=CSV] [--large] [--no-cleanup]
-  --runs=N        Number of runs per variant (default: 5)
-  -d, --debug     Build DEBUG variant and collect detailed metrics
-  --profile       perf stat on first debug run per variant
-  --validate      Print word counts
-  --threads=N     Custom NUM_THREADS build (adds to release set)
-  --hyperonly     Skip reference C build/run
-  --file=PATH     Primary input file (default: book.txt)
-  --events=LIST   perf stat events (comma-separated)
-  --pin=MASK      Pin runs via taskset (e.g., 0-23)
-  --bundle        Write debug_bundle.tar.gz with logs and sysinfo
-  --scan-threads=CSV  Build/run multiple thread counts (e.g. 6,8,12,16)
-  --large         Also test book2.txt and book3.txt if present
+Usage: $0 [OPTIONS]
+
+Options:
+  --runs=N            Number of benchmark runs (default: 5)
+  --hyperonly         Skip reference implementation
+  --file=PATH         Input file (default: book.txt)
+  --pin=MASK          CPU affinity mask (e.g., 0-5, 0,2,4)
+  --scan-threads=CSV  Test multiple thread counts (e.g., 4,6,8,12)
+  --large             Create and test 5x and 25x larger files
+  --validate          Show word count output
+  --no-cleanup        Keep binaries after run
+
+Files tested:
+  wordcount.c              - Reference parallel implementation
+  wordcount_hyperopt.c     - New optimized version (cleaned up)
+  wordcount_hyperopt_old.c - Original LLM-generated hyperopt
+
+Examples:
+  $0 --large --runs=10
+  $0 --hyperonly --scan-threads=4,6,8,12 --pin=0-5
 EOF
             exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg (use --help)"
+            exit 1
             ;;
     esac
 done
 
 echo "========================================="
-echo "C Implementation Comparison Tool"
+echo "C Word Counter Benchmark"
 echo "========================================="
 echo ""
 
-if [ $HYPER_ONLY -eq 1 ]; then
-    echo "HYPER-ONLY MODE ENABLED"
-    [ -n "$THREAD_COUNT" ] && echo "  - Testing with $THREAD_COUNT threads"
-    echo ""
-fi
-
-if [ $DEBUG_MODE -eq 1 ]; then
-    echo "DEBUG MODE ENABLED"
-    echo "  - Full instrumentation"
-    echo "  - Debug logs will be collected"
-    echo "  - Performance analysis will be detailed"
-    [ -n "$THREAD_COUNT" ] && echo "  - Testing with $THREAD_COUNT threads"
-    echo ""
-fi
-
-echo "Comparing:"
-if [ $HYPER_ONLY -eq 0 ]; then echo "  - wordcount.c (reference implementation)"; fi
-echo "  - wordcount_hyperopt.c (hyperoptimized version)"
-echo ""
-
+# Check prerequisites
 if ! command -v gcc >/dev/null 2>&1; then
     echo "Error: gcc is not installed"
     exit 1
 fi
 
-# pick march flags
-GCC_VER=$(gcc -dumpfullversion -dumpversion | cut -d. -f1)
+if ! command -v bc >/dev/null 2>&1; then
+    echo "Error: bc is not installed"
+    exit 1
+fi
+
+# ============================================================================
+# Detect CPU architecture and build flags (matches original bench_c.sh)
+# ============================================================================
+
+GCC_VER=$(gcc -dumpfullversion -dumpversion 2>/dev/null | cut -d. -f1)
 AVX_FLAGS="-mavx512f -mavx512bw -mavx512vl -msse4.2"
+
 if [ -n "$GCC_VER" ] && [ "$GCC_VER" -ge 14 ]; then
     MARCH_FLAGS="-march=znver5 -mtune=znver5 $AVX_FLAGS"
+elif [ -n "$GCC_VER" ] && [ "$GCC_VER" -ge 12 ]; then
+    # Let GCC detect the arch but force AVX flags
+    MARCH_FLAGS="-march=native -mtune=native $AVX_FLAGS"
 else
-    # fallback for older compilers
-    if lscpu 2>/dev/null | grep -qi "znver4"; then
-        MARCH_FLAGS="-march=znver4 -mtune=znver4 $AVX_FLAGS"
-    else
-        MARCH_FLAGS="-march=native -mtune=native"
-    fi
+    MARCH_FLAGS="-march=native -mtune=native"
 fi
 
-# Select files
-INPUT_FILES=("$INPUT_FILE")
-if [ $LARGE_MODE -eq 1 ]; then
-    [ -f "book2.txt" ] && INPUT_FILES+=("book2.txt")
-    [ -f "book3.txt" ] && INPUT_FILES+=("book3.txt")
-fi
+echo "GCC version: $GCC_VER"
+echo "Build flags: $MARCH_FLAGS"
+echo ""
 
-# Ensure primary exists
+# ============================================================================
+# Download primary test file if missing
+# ============================================================================
+
 if [ ! -f "$INPUT_FILE" ]; then
     echo "Downloading test file..."
-    curl -s https://www.gutenberg.org/files/2701/2701-0.txt -o "$INPUT_FILE"
+    curl -sL "https://www.gutenberg.org/files/2701/2701-0.txt" -o "$INPUT_FILE"
     echo "✓ Downloaded $INPUT_FILE"
 fi
 
+# Show primary file info
+FILE_SIZE=$(du -h "$INPUT_FILE" | cut -f1)
+WORD_COUNT=$(wc -w < "$INPUT_FILE")
+echo "Primary test file:"
+printf "  %-20s %6s  %'d words\n" "$INPUT_FILE" "$FILE_SIZE" "$WORD_COUNT"
+echo ""
+
+# ============================================================================
+# Large file creation (like original bench.sh)
+# ============================================================================
+
+create_multiplied_file() {
+    local base=$1
+    local out=$2
+    local mult=$3
+    
+    if [ -f "$out" ]; then
+        echo "✓ Using existing $out"
+        return
+    fi
+    
+    echo "Creating $out (${mult}x of $base)..."
+    : > "$out"
+    for _ in $(seq 1 "$mult"); do
+        cat "$base" >> "$out"
+    done
+    local size
+    size=$(du -h "$out" | cut -f1)
+    echo "✓ Created $out ($size)"
+}
+
+# Build input file list
+INPUT_FILES=("$INPUT_FILE")
+
+if [ $LARGE_MODE -eq 1 ]; then
+    echo "Creating larger test files..."
+    create_multiplied_file "$INPUT_FILE" "book2.txt" 5
+    create_multiplied_file "$INPUT_FILE" "book3.txt" 25
+    INPUT_FILES+=("book2.txt" "book3.txt")
+    echo ""
+fi
+
+# Show all test files
 echo "Test files:"
 for f in "${INPUT_FILES[@]}"; do
-    if [ ! -f "$f" ]; then
-        echo "  - $f (missing, will skip)"
-        continue
+    if [ -f "$f" ]; then
+        size=$(du -h "$f" | cut -f1)
+        words=$(wc -w < "$f")
+        printf "  %-20s %6s  %'d words\n" "$f" "$size" "$words"
     fi
-    FS_BYTES=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
-    FS_H=$(du -h "$f" | cut -f1)
-    WC=$(wc -w < "$f")
-    printf "  - %s (%s, %'d words)\n" "$f" "$FS_H" "$WC"
 done
 [ -n "$PIN_MASK" ] && echo "CPU pin mask: $PIN_MASK"
 echo ""
 
-rm -f wordcount_debug.log wordcount_debug_*.log
+# Results file
+RESULTS_FILE="/tmp/bench_c_results_$$.txt"
+rm -f "$RESULTS_FILE"
 
-# Build reference
-echo "Building reference C implementation..."
-if [ $DEBUG_MODE -eq 1 ] && [ $HYPER_ONLY -eq 0 ]; then
-    gcc -O2 -g -fno-omit-frame-pointer -march=native \
-        wordcount.c -o wordcount_c_ref 2>/dev/null
-else
-    gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops \
-        wordcount.c -o wordcount_c_ref 2>/dev/null
-fi
-if [ $HYPER_ONLY -eq 0 ]; then
-  if [ $? -eq 0 ]; then
-      echo "✓ Reference build successful"
-  else
-      echo "✗ Reference build failed"
-  fi
-fi
+# ============================================================================
+# Build Functions
+# ============================================================================
 
-declare -a BUILD_VARIANTS
-declare -a BUILD_NAMES
-
-if [ $DEBUG_MODE -eq 1 ]; then
-    echo ""
-    echo "Building debug variants..."
-    echo "  Building optimized debug version (O2 + DEBUG) ..."
-    if lscpu 2>/dev/null | grep -q "Zen 5\|9950X3D\|znver5"; then
-        gcc -O2 -g -DDEBUG -fno-omit-frame-pointer $MARCH_FLAGS -pthread \
-            wordcount_hyperopt.c -o wordcount_debug -lm 2>/dev/null
+build_reference() {
+    echo "Building reference ($REF_FILE)..."
+    if gcc -O3 -std=c11 -march=native -mtune=native -flto -pthread \
+           "$REF_FILE" -o wordcount_ref 2>/dev/null; then
+        echo "✓ Reference build successful"
+        return 0
     else
-        gcc -O2 -g -DDEBUG -fno-omit-frame-pointer -march=native -pthread \
-            wordcount_hyperopt.c -o wordcount_debug -lm 2>/dev/null
+        echo "✗ Reference build failed"
+        gcc -O3 -std=c11 -march=native -pthread "$REF_FILE" -o wordcount_ref 2>&1 | head -5
+        return 1
     fi
-    if [ $? -eq 0 ]; then
-        BUILD_VARIANTS+=("./wordcount_debug")
-        BUILD_NAMES+=("Debug Optimized")
-        echo "    ✓ Optimized debug build successful"
-    fi
-
-    if [ -n "$THREAD_COUNT" ]; then
-        echo "  Building debug with $THREAD_COUNT threads..."
-        gcc -O2 -g -DDEBUG -fno-omit-frame-pointer $MARCH_FLAGS -pthread \
-            -DNUM_THREADS=$THREAD_COUNT wordcount_hyperopt.c -o wordcount_debug_t$THREAD_COUNT -lm 2>/dev/null
-        if [ $? -eq 0 ]; then
-            BUILD_VARIANTS+=("./wordcount_debug_t$THREAD_COUNT")
-            BUILD_NAMES+=("Debug ${THREAD_COUNT}-thread")
-            echo "    ✓ ${THREAD_COUNT}-thread debug build successful"
-        fi
-    fi
-
-    echo "  Building optimized (O3) for comparison..."
-    gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
-        wordcount_hyperopt.c -o wordcount_hopt_opt -lm 2>/dev/null
-    if [ $? -eq 0 ]; then
-        BUILD_VARIANTS+=("./wordcount_hopt_opt")
-        BUILD_NAMES+=("Optimized (O3)")
-        echo "    ✓ Optimized build successful"
-    fi
-else
-    echo "Building hyperopt release set (6-thread, 12-thread)..."
-    gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
-        -DNUM_THREADS=6 wordcount_hyperopt.c -o wordcount_hopt_t6 -lm 2>/dev/null
-    if [ $? -eq 0 ]; then
-        BUILD_VARIANTS+=("./wordcount_hopt_t6")
-        BUILD_NAMES+=("C Hyperopt (6-thread)")
-        echo "✓ 6-thread build successful"
-    else
-        echo "✗ 6-thread build failed"; exit 1
-    fi
-    gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
-        -DNUM_THREADS=12 wordcount_hyperopt.c -o wordcount_hopt_t12 -lm 2>/dev/null
-    if [ $? -eq 0 ]; then
-        BUILD_VARIANTS+=("./wordcount_hopt_t12")
-        BUILD_NAMES+=("C Hyperopt (12-thread)")
-        echo "✓ 12-thread build successful"
-    else
-        echo "✗ 12-thread build failed"; exit 1
-    fi
-
-    # Additional scan if requested
-    if [ -n "$SCAN_THREADS" ]; then
-        OLDIFS="$IFS"; IFS=','; read -ra TLIST <<< "$SCAN_THREADS"; IFS="$OLDIFS"
-        for t in "${TLIST[@]}"; do
-            ttrim=$(echo "$t" | tr -d ' ')
-            if [ -n "$ttrim" ] && [ "$ttrim" != "6" ] && [ "$ttrim" != "12" ]; then
-                echo "Building hyperopt with ${ttrim} threads..."
-                gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
-                    -DNUM_THREADS=$ttrim wordcount_hyperopt.c -o wordcount_hopt_t$ttrim -lm 2>/dev/null
-                if [ $? -eq 0 ]; then
-                    BUILD_VARIANTS+=("./wordcount_hopt_t$ttrim")
-                    BUILD_NAMES+=("C Hyperopt (${ttrim}-thread)")
-                    echo "✓ ${ttrim}-thread build successful"
-                fi
-            fi
-        done
-    fi
-
-    if [ -n "$THREAD_COUNT" ] && [ "$THREAD_COUNT" != "6" ] && [ "$THREAD_COUNT" != "12" ]; then
-        echo "Building hyperopt with custom $THREAD_COUNT threads..."
-        gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
-            -DNUM_THREADS=$THREAD_COUNT wordcount_hyperopt.c -o wordcount_hopt_t$THREAD_COUNT -lm 2>/dev/null
-        if [ $? -eq 0 ]; then
-            BUILD_VARIANTS+=("./wordcount_hopt_t$THREAD_COUNT")
-            BUILD_NAMES+=("C Hyperopt ${THREAD_COUNT}-thread")
-            echo "✓ ${THREAD_COUNT}-thread build successful"
-        fi
-    fi
-fi
-
-echo ""
-echo "========================================="
-echo "Warming up..."
-echo "========================================="
-for f in "${INPUT_FILES[@]}"; do
-    [ -f "$f" ] && cat "$f" > /dev/null
-done
-if [ $HYPER_ONLY -eq 0 ] && [ -f "$INPUT_FILE" ]; then
-    ./wordcount_c_ref "$INPUT_FILE" > /dev/null 2>&1
-fi
-if [ ${#BUILD_VARIANTS[@]} -gt 0 ] && [ -f "$INPUT_FILE" ]; then
-    ${BUILD_VARIANTS[0]} "$INPUT_FILE" > /dev/null 2>&1
-fi
-echo "✓ Cache warmed"
-echo ""
-
-analyze_debug_log() {
-    local log_file=$1
-    local variant_name=$2
-
-    if [ ! -f "$log_file" ]; then
-        echo "    ⚠ No debug log found"
-        return
-    fi
-
-    echo "    Debug Analysis for $variant_name:"
-    echo "    ────────────────────────────────"
-    echo "    Initialization:"
-    grep -E "V-Cache CCD|PID:|mmap:|init:" "$log_file" | head -5 | sed 's/^/      /'
-
-    echo ""
-    echo "    Thread Performance:"
-    grep -E "^.*T[0-9]+:" "$log_file" | head -8 | sed 's/^/      /'
-
-    echo ""
-    echo "    Hash Table Statistics:"
-    grep -E "avg probe|max_probe|Hash resizes" "$log_file" | head -3 | sed 's/^/      /'
-
-    echo ""
-    echo "    SIMD Efficiency:"
-    local simd=$(grep -oE "SIMD chunks: *[0-9]+" "$log_file" | awk '{print $3}' | head -1)
-    local scalar=$(grep -oE "Scalar chunks: *[0-9]+" "$log_file" | awk '{print $3}' | head -1)
-    if [ -n "$simd" ] && [ -n "$scalar" ] && [ "$scalar" -gt 0 ] 2>/dev/null; then
-        local ratio=$(echo "scale=2; $simd / $scalar" | bc)
-        echo "      SIMD chunks: $simd"
-        echo "      Scalar chunks: $scalar"
-        echo "      Ratio: ${ratio}:1"
-    else
-        grep -E "SIMD chunks|Scalar chunks" "$log_file" | sed 's/^/      /' | head -2
-    fi
-
-    echo ""
-    echo "    Insert Path:"
-    grep -E "Insert: hits=|Table grow time:" "$log_file" | sed 's/^/      /'
-
-    echo ""
-    echo "    Run-length Histogram:"
-    grep -E "Run-length histogram|Word-length histogram" "$log_file" | sed 's/^/      /'
-
-    echo ""
-    echo "    Thread/CPU:"
-    grep -E "ThreadCPU T|Worker T" "$log_file" | sed 's/^/      /'
-
-    echo ""
-    echo "    Memory Statistics:"
-    grep -E "Memory:|Pool exhaustions:|leaked" "$log_file" | head -3 | sed 's/^/      /'
-
-    echo ""
-    echo "    Timing Breakdown:"
-    grep -E "processing:|merge:|top-k:" "$log_file" | sed 's/^/      /'
-
-    echo ""
-    echo "    Issues:"
-    grep -E "FATAL|ERROR|exhaustion|truncated" "$log_file" | head -5 | sed 's/^/      /'
 }
+
+build_hyperopt_new() {
+    local threads=$1
+    local output="wordcount_hopt_t${threads}"
+    
+    echo "Building $HYPEROPT_FILE (${threads} threads)..."
+    if gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
+           -DNUM_THREADS="$threads" \
+           "$HYPEROPT_FILE" -o "$output" 2>/dev/null; then
+        echo "✓ New hyperopt ${threads}-thread build successful"
+        return 0
+    else
+        echo "✗ New hyperopt ${threads}-thread build failed"
+        gcc -O3 $MARCH_FLAGS -pthread -DNUM_THREADS="$threads" \
+            "$HYPEROPT_FILE" -o "$output" 2>&1 | head -5
+        return 1
+    fi
+}
+
+build_hyperopt_old() {
+    local threads=$1
+    local output="wordcount_hopt_old_t${threads}"
+    
+    echo "Building $HYPEROPT_OLD_FILE (${threads} threads)..."
+    # Old version needs -lm for math functions
+    if gcc -O3 $MARCH_FLAGS -flto -fomit-frame-pointer -funroll-loops -pthread \
+           -DNUM_THREADS="$threads" \
+           "$HYPEROPT_OLD_FILE" -o "$output" -lm 2>/dev/null; then
+        echo "✓ Old hyperopt ${threads}-thread build successful"
+        return 0
+    else
+        echo "✗ Old hyperopt ${threads}-thread build failed"
+        gcc -O3 $MARCH_FLAGS -pthread -DNUM_THREADS="$threads" \
+            "$HYPEROPT_OLD_FILE" -o "$output" -lm 2>&1 | head -5
+        return 1
+    fi
+}
+
+# ============================================================================
+# Benchmark Function
+# ============================================================================
 
 run_bench() {
     local name="$1"
     local cmd="$2"
     local file="$3"
-    local is_debug="$4"
-
+    
     if [ ! -f "$file" ]; then
-        echo "Skipping $name: file '$file' not found"
+        echo "Skipping: $file not found"
         return
     fi
-
+    
+    if [ ! -x "$cmd" ]; then
+        echo "Skipping: $cmd not executable"
+        return
+    fi
+    
     local shortf
     shortf=$(basename "$file")
-    [ -z "$name" ] && name="$(basename "$cmd")"
-
-    echo "Testing $name ($shortf):"
-
-    if [ "$is_debug" = "1" ]; then
-        rm -f wordcount_debug.log
-    fi
-
+    local file_size
+    file_size=$(du -h "$file" | cut -f1)
+    
+    echo "Testing: $name ($shortf - $file_size)"
+    
+    # Setup taskset if requested
     local runner=""
     if [ -n "$PIN_MASK" ] && command -v taskset >/dev/null 2>&1; then
         runner="taskset -c $PIN_MASK"
     fi
-
-    if [ "$is_debug" = "1" ] && [ $PROFILE_MODE -eq 1 ] && command -v perf >/dev/null 2>&1; then
-        echo "  Run 1: (with perf stat)"
-        timeout 60 perf stat -e "$PERF_EVENTS" $runner $cmd "$file" 2>&1 | sed 's/^/    /' | tee /tmp/perf_out_$$.txt >/dev/null
-    fi
-
-    local FS_BYTES
-    FS_BYTES=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
-    local FS_MB
-    FS_MB=$(echo "scale=6; $FS_BYTES / 1048576" | bc)
-
+    
+    # Get file size in bytes
+    local fs_bytes
+    fs_bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null)
+    local fs_mb
+    fs_mb=$(echo "scale=6; $fs_bytes / 1048576" | bc)
+    
+    # Run benchmarks
     local times=()
-    local PROGRESS_TTY=0
-    if [ -t 1 ]; then PROGRESS_TTY=1; fi
-
     local sum="0"
     local min=""
-    for ((i=1; i<=NUM_RUNS; i++)); do
-        local start_ns end_ns
+    local is_tty=0
+    [ -t 1 ] && is_tty=1
+    
+    local run
+    for ((run = 1; run <= NUM_RUNS; run++)); do
+        local start_ns end_ns elapsed
         start_ns=$(date +%s%N)
-        $runner $cmd "$file" > /dev/null 2>&1
+        $runner "$cmd" "$file" > /dev/null 2>&1
         end_ns=$(date +%s%N)
-
-        local result="0.000000"
-        if [ -n "$start_ns" ] && [ -n "$end_ns" ] && [ "$end_ns" -gt "$start_ns" ] 2>/dev/null; then
-            result=$(echo "scale=6; ($end_ns - $start_ns) / 1000000000" | bc)
+        
+        elapsed=$(echo "scale=6; ($end_ns - $start_ns) / 1000000000" | bc)
+        times+=("$elapsed")
+        sum=$(echo "scale=6; $sum + $elapsed" | bc)
+        
+        if [ -z "$min" ] || (( $(echo "$elapsed < $min" | bc -l) )); then
+            min="$elapsed"
         fi
-
-        times+=("$result")
-
-        sum=$(echo "scale=6; $sum + $result" | bc)
-        if [ -z "$min" ] || (( $(echo "$result < $min" | bc -l) )); then
-            min="$result"
-        fi
+        
         local avg_so_far
-        avg_so_far=$(echo "scale=6; $sum / $i" | bc)
-
-        if [ "$PROGRESS_TTY" -eq 1 ]; then
-            printf "\r  Run %d/%d: last=%.3fs best=%.3fs avg=%.3fs\033[K" \
-                "$i" "$NUM_RUNS" "$result" "$min" "$avg_so_far"
-        else
-            printf "  Run %d: %.3fs\n" "$i" "$result"
+        avg_so_far=$(echo "scale=3; $sum / $run" | bc)
+        
+        if [ $is_tty -eq 1 ]; then
+            printf "\r  Run %d/%d: %.3fs (best: %.3fs, avg: %.3fs)\033[K" \
+                "$run" "$NUM_RUNS" "$elapsed" "$min" "$avg_so_far"
         fi
     done
-
-    if [ "$PROGRESS_TTY" -eq 1 ]; then
-        printf "\n"
-    fi
-
+    
+    [ $is_tty -eq 1 ] && printf "\n"
+    
+    # Calculate statistics
     local avg
     avg=$(echo "scale=6; $sum / $NUM_RUNS" | bc)
-
-    local sorted=($(printf "%s\n" "${times[@]}" | sort -n))
-    local p50=${sorted[$((NUM_RUNS*50/100))]}
-    local p95=${sorted[$((NUM_RUNS*95/100))]}
-    local p99=${sorted[$((NUM_RUNS*99/100))]}
-
-    local gsum=0
-    for t in "${times[@]}"; do
-        if (( $(echo "$t <= 0" | bc -l) )); then t="0.000001"; fi
-        gsum=$(echo "$gsum + l($t)" | bc -l)
-    done
-    local gmean
-    gmean=$(echo "e($gsum / $NUM_RUNS)" | bc -l 2>/dev/null | awk '{printf("%.6f",$0)}')
-
+    
+    # Sort for percentiles
+    local sorted
+    sorted=$(printf "%s\n" "${times[@]}" | sort -n)
+    local p50 p95
+    p50=$(echo "$sorted" | sed -n "$((NUM_RUNS * 50 / 100 + 1))p")
+    p95=$(echo "$sorted" | sed -n "$((NUM_RUNS * 95 / 100 + 1))p")
+    
+    # Throughput based on best time
     local throughput="N/A"
     if (( $(echo "$min > 0" | bc -l) )); then
-        throughput=$(echo "scale=2; $FS_MB / $min" | bc)
+        throughput=$(echo "scale=2; $fs_mb / $min" | bc)
     fi
-
-    printf "  Average: %.3fs\n" "$avg"
-    printf "  Best:    %.3fs\n" "$min"
-    printf "  p50:     %.3fs  p95: %.3fs  p99: %.3fs  gmean: %.6fs\n" \
-        "$p50" "$p95" "$p99" "$gmean"
-    if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
-        printf "  Throughput: %.2f MB/s\n" "$throughput"
-    else
-        echo "  Throughput: $throughput"
-    fi
-
-    if [ "$is_debug" = "1" ] && [ -f "wordcount_debug.log" ]; then
-        cp wordcount_debug.log "/tmp/${name// /_}_debug.log" 2>/dev/null
-        echo ""
-        analyze_debug_log "wordcount_debug.log" "$name ($shortf)"
-    fi
-
+    
+    printf "  Average: %.3fs | Best: %.3fs | p50: %.3fs | p95: %.3fs\n" \
+        "$avg" "$min" "$p50" "$p95"
+    printf "  Throughput: %.2f MB/s\n" "$throughput"
     echo ""
-
-    local label="$name [$shortf]"
-    if [ "$name" = "C Reference" ] && [ "$shortf" = "$(basename "$INPUT_FILE")" ]; then
-        label="$name"
-    fi
-    echo "$label|$avg|$min|$throughput" >> /tmp/bench_c_results_$$.txt
-    if [ -f /tmp/perf_out_$$.txt ]; then
-        mv /tmp/perf_out_$$.txt "/tmp/perf_${label// /_}_$$.txt"
-    fi
+    
+    # Record results
+    echo "${name}[${shortf}]|$avg|$min|$throughput" >> "$RESULTS_FILE"
 }
 
-bundle_results() {
-    local dir="debug_bundle"
-    rm -rf "$dir" >/dev/null 2>&1
-    mkdir -p "$dir"
-    cp -f wordcount_debug.log "$dir"/ 2>/dev/null
-    cp -f /tmp/bench_c_results_$$.txt "$dir"/results.txt 2>/dev/null
-    {
-        echo "===== uname -a ====="
-        uname -a
-        echo -e "\n===== lscpu ====="
-        lscpu 2>&1
-        echo -e "\n===== gcc -v ====="
-        gcc -v 2>&1
-        echo -e "\n===== /etc/os-release ====="
-        cat /etc/os-release 2>/dev/null
-    } > "$dir/sysinfo.txt"
-    tar -czf debug_bundle.tar.gz "$dir"
-    echo "✓ Debug bundle written: debug_bundle.tar.gz"
-}
+# ============================================================================
+# Main Build Phase
+# ============================================================================
 
 echo "========================================="
-echo "Running Benchmarks ($NUM_RUNS runs each)"
+echo "Building"
 echo "========================================="
 echo ""
 
-rm -f /tmp/bench_c_results_$$.txt
+declare -a BUILDS=()
+declare -a BUILD_NAMES=()
 
-# Run C reference on all files if available and not in hyper-only mode
-if [ $HYPER_ONLY -eq 0 ] && [ -x ./wordcount_c_ref ]; then
-    for f in "${INPUT_FILES[@]}"; do
-        run_bench "C Reference" "./wordcount_c_ref" "$f" "0"
-    done
+# Build reference if not hyper-only
+if [ $HYPER_ONLY -eq 0 ] && [ -f "$REF_FILE" ]; then
+    if build_reference; then
+        BUILDS+=("./wordcount_ref")
+        BUILD_NAMES+=("Reference")
+    fi
 fi
 
-# Run all hyperopt builds for all files
-for i in "${!BUILD_VARIANTS[@]}"; do
-    is_debug="0"
-    [[ "${BUILD_NAMES[$i]}" == *"Debug"* ]] && is_debug="1"
+# Determine thread counts to test
+THREAD_COUNTS=(6 12)  # Default
+
+if [ -n "$SCAN_THREADS" ]; then
+    IFS=',' read -ra THREAD_COUNTS <<< "$SCAN_THREADS"
+fi
+
+# Build NEW hyperopt variants
+if [ -f "$HYPEROPT_FILE" ]; then
+    echo ""
+    for t in "${THREAD_COUNTS[@]}"; do
+        t=$(echo "$t" | tr -d ' ')
+        if build_hyperopt_new "$t"; then
+            BUILDS+=("./wordcount_hopt_t${t}")
+            BUILD_NAMES+=("New Hyperopt (${t}T)")
+        fi
+    done
+else
+    echo "Note: $HYPEROPT_FILE not found"
+fi
+
+# Build OLD hyperopt variants
+if [ -f "$HYPEROPT_OLD_FILE" ]; then
+    echo ""
+    echo "Found $HYPEROPT_OLD_FILE - building for comparison..."
+    for t in "${THREAD_COUNTS[@]}"; do
+        t=$(echo "$t" | tr -d ' ')
+        if build_hyperopt_old "$t"; then
+            BUILDS+=("./wordcount_hopt_old_t${t}")
+            BUILD_NAMES+=("Old Hyperopt (${t}T)")
+        fi
+    done
+else
+    echo "Note: $HYPEROPT_OLD_FILE not found (skipping old version comparison)"
+fi
+
+if [ ${#BUILDS[@]} -eq 0 ]; then
+    echo "Error: No implementations built successfully"
+    exit 1
+fi
+
+echo ""
+echo "========================================="
+echo "Warming Up"
+echo "========================================="
+
+# Warm filesystem cache
+for f in "${INPUT_FILES[@]}"; do
+    [ -f "$f" ] && cat "$f" > /dev/null
+done
+
+# Warm CPU with first build
+if [ -f "$INPUT_FILE" ]; then
+    "${BUILDS[0]}" "$INPUT_FILE" > /dev/null 2>&1 || true
+fi
+echo "✓ Cache warmed"
+echo ""
+
+echo "========================================="
+echo "Benchmarking ($NUM_RUNS runs each)"
+echo "========================================="
+echo ""
+
+# Run all benchmarks
+for idx in "${!BUILDS[@]}"; do
     for f in "${INPUT_FILES[@]}"; do
-        run_bench "${BUILD_NAMES[$i]}" "${BUILD_VARIANTS[$i]}" "$f" "$is_debug"
+        run_bench "${BUILD_NAMES[$idx]}" "${BUILDS[$idx]}" "$f"
     done
 done
 
-if [ $DEBUG_MODE -eq 1 ]; then
+# Show validation output if requested
+if [ $VALIDATE_MODE -eq 1 ]; then
     echo "========================================="
-    echo "Debug Mode Analysis Summary"
+    echo "Validation Output"
     echo "========================================="
     echo ""
-    [ -f "wordcount_debug.log" ] && {
-        echo "Debug Log Output (wordcount_debug.log):"
-        echo "────────────────────────────────────────"
-        cat wordcount_debug.log
-        echo ""
-    }
+    
+    # Show output from each implementation type (first of each)
+    for idx in "${!BUILD_NAMES[@]}"; do
+        name="${BUILD_NAMES[$idx]}"
+        # Only show first occurrence of each type
+        case "$name" in
+            "Reference")
+                echo "--- Reference ---"
+                "${BUILDS[$idx]}" "$INPUT_FILE" 2>&1 | head -20
+                echo ""
+                ;;
+            "New Hyperopt (6T)")
+                echo "--- New Hyperopt ---"
+                "${BUILDS[$idx]}" "$INPUT_FILE" 2>&1 | head -20
+                echo ""
+                ;;
+            "Old Hyperopt (6T)")
+                echo "--- Old Hyperopt ---"
+                "${BUILDS[$idx]}" "$INPUT_FILE" 2>&1 | head -20
+                echo ""
+                ;;
+        esac
+    done
 fi
 
-echo ""
 echo "========================================="
-echo "Performance Summary"
+echo "Summary"
 echo "========================================="
 echo ""
 
-echo "Implementation               Average    Best     Throughput   vs Reference"
-echo "──────────────────────────────────────────────────────────────────────────"
+printf "%-28s %10s %10s %12s %8s\n" "Implementation" "Average" "Best" "Throughput" "vs Ref"
+printf "%-28s %10s %10s %12s %8s\n" "----------------------------" "----------" "----------" "------------" "--------"
 
-# Build per-file reference averages
-declare -A REF_AVG_BY_FILE
-PRIMARY_FILE_BASENAME="$(basename "$INPUT_FILE")"
-while IFS='|' read -r name avg min throughput; do
-    if [[ "$name" == C\ Reference* ]]; then
-        # Extract [file] if present; else primary file
-        shortf=$(echo "$name" | sed -n 's/.*\[\(.*\)\].*/\1/p')
-        if [ -z "$shortf" ]; then
-            shortf="$PRIMARY_FILE_BASENAME"
-        fi
-        REF_AVG_BY_FILE["$shortf"]="$avg"
+# Get reference time for comparison (per file)
+declare -A REF_AVG
+while IFS='|' read -r name avg best throughput; do
+    if [[ "$name" == Reference* ]]; then
+        REF_AVG["$name"]="$avg"
     fi
-done < /tmp/bench_c_results_$$.txt
+done < "$RESULTS_FILE"
 
-# Print rows using file-matched reference if available
-while IFS='|' read -r name avg min throughput; do
-    # Determine which file this row corresponds to (if any)
-    shortf=$(echo "$name" | sed -n 's/.*\[\(.*\)\].*/\1/p')
-    if [ -z "$shortf" ]; then
-        shortf="$PRIMARY_FILE_BASENAME"
+# Print results
+while IFS='|' read -r name avg best throughput; do
+    speedup="-"
+    
+    # Extract file from name like "New Hyperopt (6T)[book2.txt]"
+    file_tag=$(echo "$name" | grep -oP '\[.*\]' || echo "[${INPUT_FILE}]")
+    ref_key="Reference${file_tag}"
+    ref_avg="${REF_AVG[$ref_key]:-}"
+    
+    if [[ "$name" == Reference* ]]; then
+        speedup="baseline"
+    elif [ -n "$ref_avg" ] && (( $(echo "$avg > 0" | bc -l) )); then
+        speedup=$(echo "scale=2; $ref_avg / $avg" | bc)
+        speedup="${speedup}x"
     fi
-
-    if [[ "$name" == "C Reference" || "$name" == C\ Reference\ \[* ]]; then
-        if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
-            # Mark the exact "C Reference" for primary file as baseline
-            if [ "$name" = "C Reference" ]; then
-                printf "%-28s %8.3fs %8.3fs %8.2f MB/s   baseline\n" \
-                    "$name" "$avg" "$min" "$throughput"
-            else
-                printf "%-28s %8.3fs %8.3fs %8.2f MB/s\n" \
-                    "$name" "$avg" "$min" "$throughput"
-            fi
-        else
-            printf "%-28s %8.3fs %8.3fs %8s\n" "$name" "$avg" "$min" "$throughput"
-        fi
-    else
-        ref_for_file="${REF_AVG_BY_FILE["$shortf"]}"
-        if [ -n "$ref_for_file" ]; then
-            speedup=$(echo "scale=2; $ref_for_file / $avg" | bc)
-            if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
-                printf "%-28s %8.3fs %8.3fs %8.2f MB/s   %.2fx\n" \
-                    "$name" "$avg" "$min" "$throughput" "$speedup"
-            else
-                printf "%-28s %8.3fs %8.3fs %8s   %.2fx\n" \
-                    "$name" "$avg" "$min" "$throughput" "$speedup"
-            fi
-        else
-            if [[ "$throughput" =~ ^[0-9.]+$ ]]; then
-                printf "%-28s %8.3fs %8.3fs %8.2f MB/s\n" \
-                    "$name" "$avg" "$min" "$throughput"
-            else
-                printf "%-28s %8.3fs %8.3fs %8s\n" "$name" "$avg" "$min" "$throughput"
-            fi
-        fi
-    fi
-done < /tmp/bench_c_results_$$.txt
+    
+    printf "%-28s %9.3fs %9.3fs %10.2f MB/s %8s\n" \
+        "$name" "$avg" "$best" "$throughput" "$speedup"
+done < "$RESULTS_FILE"
 
 echo ""
+
+# ============================================================================
+# Performance Analysis
+# ============================================================================
+
 echo "========================================="
 echo "Performance Analysis"
 echo "========================================="
 echo ""
 
+# Find best performer per file
+echo "Best performers by file:"
+for f in "${INPUT_FILES[@]}"; do
+    shortf=$(basename "$f")
+    best_tp=0
+    best_name=""
+    while IFS='|' read -r name _ _ tp; do
+        if [[ "$name" == *"[$shortf]"* ]] && [[ "$tp" =~ ^[0-9.]+$ ]]; then
+            if (( $(echo "$tp > $best_tp" | bc -l) )); then
+                best_tp=$tp
+                best_name=$name
+            fi
+        fi
+    done < "$RESULTS_FILE"
+    if [ -n "$best_name" ]; then
+        printf "  %-12s: %-28s @ %.2f MB/s\n" "$shortf" "$best_name" "$best_tp"
+    fi
+done
+echo ""
+
+# Overall best
 best_throughput=0
 best_impl=""
 while IFS='|' read -r name avg min throughput; do
@@ -576,48 +521,65 @@ while IFS='|' read -r name avg min throughput; do
         best_throughput=$throughput
         best_impl=$name
     fi
-done < /tmp/bench_c_results_$$.txt
+done < "$RESULTS_FILE"
 
-echo "Best performer: $best_impl"
+echo "Overall best: $best_impl"
 echo "Peak throughput: ${best_throughput} MB/s"
 echo ""
 
-target_throughput=3000
-if [[ "$best_throughput" =~ ^[0-9.]+$ ]]; then
-    throughput_pct=$(echo "scale=1; $best_throughput * 100 / $target_throughput" | bc)
-else
-    throughput_pct="N/A"
+# Compare new vs old hyperopt if both present
+new_best=0
+old_best=0
+while IFS='|' read -r name _ _ tp; do
+    if [[ "$name" == "New Hyperopt"* ]] && [[ "$tp" =~ ^[0-9.]+$ ]]; then
+        if (( $(echo "$tp > $new_best" | bc -l) )); then
+            new_best=$tp
+        fi
+    fi
+    if [[ "$name" == "Old Hyperopt"* ]] && [[ "$tp" =~ ^[0-9.]+$ ]]; then
+        if (( $(echo "$tp > $old_best" | bc -l) )); then
+            old_best=$tp
+        fi
+    fi
+done < "$RESULTS_FILE"
+
+if (( $(echo "$new_best > 0 && $old_best > 0" | bc -l) )); then
+    echo "New vs Old Hyperopt comparison:"
+    printf "  New best: %.2f MB/s\n" "$new_best"
+    printf "  Old best: %.2f MB/s\n" "$old_best"
+    if (( $(echo "$new_best > $old_best" | bc -l) )); then
+        diff=$(echo "scale=1; ($new_best - $old_best) * 100 / $old_best" | bc)
+        echo "  → New is ${diff}% faster"
+    else
+        diff=$(echo "scale=1; ($old_best - $new_best) * 100 / $new_best" | bc)
+        echo "  → Old is ${diff}% faster"
+    fi
+    echo ""
 fi
-echo "Target Analysis:"
-echo "  Target throughput: 3.0 GB/s"
-echo "  Achieved: ${best_throughput} MB/s (${throughput_pct}% of target)"
-echo ""
 
-echo ""
-if [ "$NO_CLEANUP" -eq 1 ]; then
-    response="n"
-    echo "Skipping cleanup (--no-cleanup flag set)"
-elif [ -t 0 ]; then
-    echo "Clean up test binaries, logs, and output files? (y/n)"
-    read -r response
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+if [ $NO_CLEANUP -eq 0 ]; then
+    if [ -t 0 ]; then
+        read -rp "Clean up binaries? (y/n) " response
+    else
+        response="n"
+    fi
+    
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        rm -f wordcount_ref wordcount_hopt_t* wordcount_hopt_old_t* "$RESULTS_FILE"
+        rm -f *_c-hopt_results.txt  # Old hyperopt writes these
+        
+        if [ $LARGE_MODE -eq 1 ]; then
+            read -rp "Also remove book2.txt and book3.txt? (y/n) " response2
+            if [[ "$response2" =~ ^[Yy]$ ]]; then
+                rm -f book2.txt book3.txt
+            fi
+        fi
+        echo "✓ Cleaned up"
+    fi
 else
-    read -r response 2>/dev/null || response="n"
-fi
-
-[ "$BUNDLE" -eq 1 ] && bundle_results
-
-if [[ "$response" =~ ^[Yy]$ ]]; then
-    rm -f wordcount_c_ref wordcount_hopt* wordcount_debug*
-    rm -f wordcount_asan
-    rm -f /tmp/bench_c_*_$$.txt /tmp/*_debug.log
-    rm -f perf.data perf.data.old
-    rm -f wordcount_debug.log
-    rm -f *.gcda *.gcno
-    rm -f book_c-hopt_results.txt
-    rm -f book_c_results.txt
-    rm -rf debug_bundle
-    rm -f debug_bundle.tar.gz
-    echo "✓ Cleaned up all files"
-else
-    echo "✓ Keeping all files"
+    echo "Binaries kept (--no-cleanup)"
 fi

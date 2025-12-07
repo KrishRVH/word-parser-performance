@@ -1,0 +1,26 @@
+---
+Checks: >-
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  portability-*,
+  cert-*,
+  misc-redundant-expression,
+  readability-isolate-declaration,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -bugprone-reserved-identifier,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-narrowing-conversions,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-sizeof-expression,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp
+
+# Additional exclusions rationale:
+#   - multi-level-implicit-pointer-conversion: C allows void* <-> T** implicitly; idiomatic for malloc/calloc/free
+#   - sizeof-expression: sizeof(*ptr) pattern is correct and preferred for allocations
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*'
+FormatStyle: file

@@ -87,13 +87,11 @@ fi
 
 # Show info for the primary test file
 FILE_SIZE=$(du -h book.txt | cut -f1)
-WORD_COUNT=$(wc -w < book.txt)
-LINE_COUNT=$(wc -l < book.txt)
+WORD_COUNT_WC=$(wc -w < book.txt)
 echo ""
 echo "Test file information:"
 echo "  Size: $FILE_SIZE"
-echo "  Words: $(printf "%'d" $WORD_COUNT)"
-echo "  Lines: $(printf "%'d" $LINE_COUNT)"
+echo "  Words (wc -w):        $(printf "%'d" "$WORD_COUNT_WC")"
 echo ""
 
 # Create book2.txt (5x) and book3.txt (25x) if user opts in
@@ -155,7 +153,7 @@ fi
 if [ "$HAS_GCC" = "1" ]; then
     echo "Compiling C reference..."
     gcc -O3 -march=native -mtune=native -flto -fomit-frame-pointer -funroll-loops \
-        wordcount.c -o wordcount_c 2>/dev/null
+        ./wordcount.c -o wordcount_c 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "✓ C compilation successful"
     else
@@ -475,7 +473,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     echo ""
 
     if [ "$HAS_GCC" = "1" ]; then
-        [ -f "wordcount_c" ] && run_benchmark "C" "./wordcount_c" "$TEST_FILE"
+        [ -f "wordcount_c" ] && run_benchmark "C" "wordcount_c" "$TEST_FILE"
         [ -f "wordcount_hopt_t6" ] && run_benchmark "C hyperopt (6-thread)" "./wordcount_hopt_t6" "$TEST_FILE"
         [ -f "wordcount_hopt_t12" ] && run_benchmark "C hyperopt (12-thread)" "./wordcount_hopt_t12" "$TEST_FILE"
     fi

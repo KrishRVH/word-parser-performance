@@ -1,264 +1,573 @@
-// wordcount.c - Word frequency counter
-// Build: gcc -O3 -march=native wordcount.c -o wordcount_c
-// Usage: ./wordcount_c [filename]
+/*
+ * wordcount.c — Parallel word frequency counter
+ *
+ * Build:  cc -std=c11 -O2 -pthread wordcount.c -o wordcount
+ * Usage:  ./wordcount <file>
+ *
+ * Design: Memory-mapped I/O, per-thread hash tables with arena-allocated
+ * strings, embarrassingly parallel (no shared mutable state in hot path).
+ */
 
+#if defined(_WIN32)
+#define PLATFORM_WINDOWS
+#define WIN32_LEAN_AND_MEAN
+#define _CRT_SECURE_NO_WARNINGS
+#else
+#define _POSIX_C_SOURCE 200809L
+#define PLATFORM_POSIX
+#endif
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-#include <time.h>
+
+#ifdef PLATFORM_WINDOWS
+#include <windows.h>
+#include <process.h>
+#else
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#endif
 
-#define HASH_SIZE 16384
-#define MAX_WORD_LENGTH 100
-#define TOP_WORDS 100
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Configuration
+ * ═══════════════════════════════════════════════════════════════════════════*/
 
-typedef struct WordNode {
-    char* word;
-    int count;
-    struct WordNode* next;
-} WordNode;
+enum {
+    MAX_THREADS = 32,
+    INITIAL_CAP = 1 << 12,
+    MAX_WORD_LEN = 63,
+    TOP_N = 10,
+};
+
+_Static_assert((INITIAL_CAP & (INITIAL_CAP - 1)) == 0, "must be power of 2");
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Platform: Memory-Mapped Files
+ * ═══════════════════════════════════════════════════════════════════════════*/
 
 typedef struct {
-    char* word;
-    int count;
-} WordCount;
+    const char *data;
+    size_t size;
+#ifdef PLATFORM_WINDOWS
+    HANDLE file, mapping;
+#else
+    int fd;
+#endif
+} MappedFile;
 
-static long total_words = 0;
-static int unique_words = 0;
+static int mf_open(MappedFile *mf, const char *path)
+{
+    *mf = (MappedFile){ 0 };
 
-// FNV-1a hash function
-static inline unsigned int hash_function(const char* str) {
-    unsigned int hash = 2166136261u;
-    while (*str) {
-        hash ^= (unsigned char)*str++;
-        hash *= 16777619;
+#ifdef PLATFORM_WINDOWS
+    mf->file = CreateFileA(path,
+                           GENERIC_READ,
+                           FILE_SHARE_READ,
+                           NULL,
+                           OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL,
+                           NULL);
+    if (mf->file == INVALID_HANDLE_VALUE)
+        return -1;
+
+    LARGE_INTEGER li;
+    if (!GetFileSizeEx(mf->file, &li) || li.QuadPart == 0)
+        goto fail;
+    mf->size = (size_t)li.QuadPart;
+
+    mf->mapping = CreateFileMappingA(mf->file, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mf->mapping)
+        goto fail;
+
+    mf->data = MapViewOfFile(mf->mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!mf->data) {
+        CloseHandle(mf->mapping);
+        mf->mapping = NULL;
+        goto fail;
     }
-    return hash & (HASH_SIZE - 1);
-}
+    return 0;
 
-static WordNode* create_node(const char* word) {
-    WordNode* node = (WordNode*)malloc(sizeof(WordNode));
-    node->word = strdup(word);
-    node->count = 1;
-    node->next = NULL;
-    unique_words++;
-    return node;
-}
+fail:
+    CloseHandle(mf->file);
+    mf->file = NULL;
+    return -1;
 
-static void insert_word(WordNode** table, const char* word) {
-    unsigned int index = hash_function(word);
-    WordNode* node = table[index];
-    
-    WordNode* prev = NULL;
-    while (node) {
-        if (strcmp(node->word, word) == 0) {
-            node->count++;
-            total_words++;
-            return;
-        }
-        prev = node;
-        node = node->next;
-    }
-    
-    WordNode* new_node = create_node(word);
-    if (prev) {
-        prev->next = new_node;
-    } else {
-        table[index] = new_node;
-    }
-    total_words++;
-}
+#else
+    mf->fd = open(path, O_RDONLY);
+    if (mf->fd < 0)
+        return -1;
 
-static inline int extract_word(char* dest, const char* src, int* pos) {
-    int i = 0;
-    int p = *pos;
-    
-    while (src[p] && !isalpha(src[p])) p++;
-    
-    while (src[p] && isalpha(src[p]) && i < MAX_WORD_LENGTH - 1) {
-        dest[i++] = tolower(src[p++]);
-    }
-    
-    dest[i] = '\0';
-    *pos = p;
-    return i;
-}
-
-// Comparison function for qsort
-static int compare_words(const void* a, const void* b) {
-    const WordCount* wa = (const WordCount*)a;
-    const WordCount* wb = (const WordCount*)b;
-    if (wb->count != wa->count) {
-        return wb->count - wa->count;
-    }
-    return strcmp(wa->word, wb->word);
-}
-
-static void free_table(WordNode** table) {
-    for (int i = 0; i < HASH_SIZE; i++) {
-        WordNode* node = table[i];
-        while (node) {
-            WordNode* next = node->next;
-            free(node->word);
-            free(node);
-            node = next;
-        }
-    }
-}
-
-static double get_file_size_mb(const char* filename) {
     struct stat st;
-    if (stat(filename, &st) == 0) {
-        return st.st_size / (1024.0 * 1024.0);
+    if (fstat(mf->fd, &st) < 0 || st.st_size == 0) {
+        close(mf->fd);
+        mf->fd = -1;
+        return -1;
+    }
+    mf->size = (size_t)st.st_size;
+
+    mf->data = mmap(NULL, mf->size, PROT_READ, MAP_PRIVATE, mf->fd, 0);
+    if (mf->data == MAP_FAILED) {
+        mf->data = NULL;
+        close(mf->fd);
+        mf->fd = -1;
+        return -1;
+    }
+
+#ifdef POSIX_MADV_SEQUENTIAL
+    posix_madvise((void *)mf->data, mf->size, POSIX_MADV_SEQUENTIAL);
+#endif
+    return 0;
+#endif
+}
+
+static void mf_close(MappedFile *mf)
+{
+#ifdef PLATFORM_WINDOWS
+    if (mf->data)
+        UnmapViewOfFile(mf->data);
+    if (mf->mapping)
+        CloseHandle(mf->mapping);
+    if (mf->file && mf->file != INVALID_HANDLE_VALUE)
+        CloseHandle(mf->file);
+#else
+    if (mf->data)
+        munmap((void *)mf->data, mf->size);
+    if (mf->fd > 0)
+        close(mf->fd);
+#endif
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Platform: Threading
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+#ifdef PLATFORM_WINDOWS
+static HANDLE g_threads[MAX_THREADS];
+#else
+static pthread_t g_threads[MAX_THREADS];
+#endif
+static int g_nthreads;
+
+static int ncpu(void)
+{
+#ifdef PLATFORM_WINDOWS
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int)si.dwNumberOfProcessors;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Arena Allocator
+ *
+ * Bump allocator for string storage. No individual frees—entire arena
+ * released at once. Alignment handled via pointer arithmetic.
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+typedef struct {
+    char *buf, *ptr, *end;
+} Arena;
+
+static int arena_init(Arena *a, size_t cap)
+{
+    a->buf = malloc(cap);
+    if (!a->buf)
+        return -1;
+    a->ptr = a->buf;
+    a->end = a->buf + cap;
+    return 0;
+}
+
+static void arena_free(Arena *a)
+{
+    free(a->buf);
+    a->buf = NULL;
+}
+
+static void *arena_alloc(Arena *a, size_t size, size_t align)
+{
+    uintptr_t p = (uintptr_t)a->ptr;
+    uintptr_t aligned = (p + align - 1) & ~(align - 1);
+    if (aligned + size > (uintptr_t)a->end)
+        return NULL;
+    a->ptr = (char *)(aligned + size);
+    return (void *)aligned;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Hash Table
+ *
+ * Open addressing with linear probing. FNV-1a hash computed incrementally
+ * during tokenization. Power-of-2 capacity for fast modulo via bitmask.
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+#define FNV_OFFSET 14695981039346656037ULL
+#define FNV_PRIME 1099511628211ULL
+
+typedef struct {
+    char *key;
+    size_t count;
+    uint64_t hash;
+} Entry;
+
+typedef struct {
+    Entry *entries;
+    size_t cap, len, total;
+    Arena strings;
+} Table;
+
+static int table_init(Table *t, size_t cap, size_t arena_cap)
+{
+    t->entries = calloc(cap, sizeof(Entry));
+    if (!t->entries)
+        return -1;
+    if (arena_init(&t->strings, arena_cap) < 0) {
+        free(t->entries);
+        t->entries = NULL;
+        return -1;
+    }
+    t->cap = cap;
+    t->len = t->total = 0;
+    return 0;
+}
+
+static void table_free(Table *t)
+{
+    if (!t)
+        return;
+    free(t->entries);
+    t->entries = NULL;
+    arena_free(&t->strings);
+}
+
+static int table_grow(Table *t)
+{
+    size_t new_cap = t->cap * 2;
+    Entry *new_ent = calloc(new_cap, sizeof(Entry));
+    if (!new_ent)
+        return -1;
+
+    for (size_t i = 0; i < t->cap; i++) {
+        const Entry *e = &t->entries[i];
+        if (!e->key)
+            continue;
+        size_t idx = e->hash & (new_cap - 1);
+        while (new_ent[idx].key)
+            idx = (idx + 1) & (new_cap - 1);
+        new_ent[idx] = *e;
+    }
+    free(t->entries);
+    t->entries = new_ent;
+    t->cap = new_cap;
+    return 0;
+}
+
+static int table_add(Table *t, const char *word, size_t len, uint64_t hash)
+{
+    if (t->len * 10 >= t->cap * 7 && table_grow(t) < 0)
+        return -1;
+
+    size_t idx = hash & (t->cap - 1);
+    for (;;) {
+        Entry *e = &t->entries[idx];
+        if (!e->key) {
+            char *s = arena_alloc(&t->strings, len + 1, 1);
+            if (!s)
+                return -1;
+            memcpy(s, word, len);
+            s[len] = '\0';
+            *e = (Entry){ .key = s, .count = 1, .hash = hash };
+            t->len++;
+            t->total++;
+            return 0;
+        }
+        if (e->hash == hash && memcmp(e->key, word, len) == 0 && !e->key[len]) {
+            e->count++;
+            t->total++;
+            return 0;
+        }
+        idx = (idx + 1) & (t->cap - 1);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Tokenizer
+ *
+ * Extracts words, lowercases, computes FNV-1a hash in single pass.
+ * Branchless is_alpha avoids table lookups.
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+static inline bool is_alpha(unsigned c)
+{
+    return ((c | 32) - 'a') < 26u;
+}
+
+static int tokenize(Table *t, const char *data, size_t len)
+{
+    const unsigned char *p = (const unsigned char *)data;
+    const unsigned char *end = p + len;
+    char word[MAX_WORD_LEN + 1];
+
+    while (p < end) {
+        while (p < end && !is_alpha(*p))
+            p++;
+        if (p >= end)
+            break;
+
+        uint64_t hash = FNV_OFFSET;
+        size_t wlen = 0;
+
+        while (p < end && is_alpha(*p)) {
+            unsigned c = *p++ | 32;
+            hash = (hash ^ c) * FNV_PRIME;
+            if (wlen < MAX_WORD_LEN)
+                word[wlen++] = (char)c;
+        }
+        if (table_add(t, word, wlen, hash) < 0)
+            return -1;
     }
     return 0;
 }
 
-static void format_number(char* buffer, long num) {
-    char temp[32];
-    sprintf(temp, "%ld", num);
-    int len = strlen(temp);
-    int comma_count = (len - 1) / 3;
-    int out_len = len + comma_count;
-    buffer[out_len] = '\0';
-    
-    int temp_pos = len - 1;
-    int out_pos = out_len - 1;
-    int digit_count = 0;
-    
-    while (temp_pos >= 0) {
-        if (digit_count == 3) {
-            buffer[out_pos--] = ',';
-            digit_count = 0;
-        }
-        buffer[out_pos--] = temp[temp_pos--];
-        digit_count++;
-    }
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Worker Threads
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+typedef struct {
+    const char *data;
+    size_t len;
+    Table table;
+    int err;
+} Worker;
+
+static void process_chunk(Worker *w)
+{
+    w->err = tokenize(&w->table, w->data, w->len);
 }
 
-int main(int argc, char* argv[]) {
-    const char* filename = (argc > 1) ? argv[1] : "book.txt";
-    
-    FILE* file = fopen(filename, "r");
-    if (!file) {
-        fprintf(stderr, "Error: File '%s' not found\n", filename);
-        printf("Usage: %s [filename]\n\n", argv[0]);
-        printf("To create a test file:\n");
-        printf("curl https://www.gutenberg.org/files/2701/2701-0.txt -o book.txt\n");
-        return 1;
+#ifdef PLATFORM_WINDOWS
+static unsigned __stdcall worker_entry(void *arg)
+{
+    process_chunk(arg);
+    return 0;
+}
+#else
+static void *worker_entry(void *arg)
+{
+    process_chunk(arg);
+    return NULL;
+}
+#endif
+
+static int spawn_workers(Worker *w, int n)
+{
+    for (int i = 0; i < n; i++) {
+#ifdef PLATFORM_WINDOWS
+        g_threads[i] =
+                (HANDLE)_beginthreadex(NULL, 0, worker_entry, &w[i], 0, NULL);
+        if (!g_threads[i])
+            return -1;
+#else
+        if (pthread_create(&g_threads[i], NULL, worker_entry, &w[i]))
+            return -1;
+#endif
     }
-    
-    printf("Processing file: %s\n", filename);
-    
-    clock_t start_time = clock();
-    
-    WordNode** table = (WordNode**)calloc(HASH_SIZE, sizeof(WordNode*));
-    if (!table) {
-        fprintf(stderr, "Memory allocation failed\n");
-        fclose(file);
-        return 1;
-    }
-    
-    char buffer[8192];
-    char word[MAX_WORD_LENGTH];
-    
-    while (fgets(buffer, sizeof(buffer), file)) {
-        int pos = 0;
-        int len = strlen(buffer);
-        
-        while (pos < len) {
-            if (extract_word(word, buffer, &pos) > 0) {
-                insert_word(table, word);
+    g_nthreads = n;
+    return 0;
+}
+
+static void join_workers(void)
+{
+#ifdef PLATFORM_WINDOWS
+    WaitForMultipleObjects(g_nthreads, g_threads, TRUE, INFINITE);
+    for (int i = 0; i < g_nthreads; i++)
+        CloseHandle(g_threads[i]);
+#else
+    for (int i = 0; i < g_nthreads; i++)
+        pthread_join(g_threads[i], NULL);
+#endif
+    g_nthreads = 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Merge & Output
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+static int merge_into(Table *dst, Worker *workers, int n)
+{
+    for (int w = 0; w < n; w++) {
+        Table *src = &workers[w].table;
+        for (size_t i = 0; i < src->cap; i++) {
+            const Entry *e = &src->entries[i];
+            if (!e->key)
+                continue;
+
+            if (dst->len * 10 >= dst->cap * 7 && table_grow(dst) < 0)
+                return -1;
+
+            size_t idx = e->hash & (dst->cap - 1);
+            for (;;) {
+                Entry *d = &dst->entries[idx];
+                if (!d->key) {
+                    *d = *e;
+                    dst->len++;
+                    dst->total += e->count;
+                    break;
+                }
+                if (d->hash == e->hash && strcmp(d->key, e->key) == 0) {
+                    d->count += e->count;
+                    dst->total += e->count;
+                    break;
+                }
+                idx = (idx + 1) & (dst->cap - 1);
             }
         }
     }
-    
-    fclose(file);
-    
-    WordCount* words = (WordCount*)malloc(unique_words * sizeof(WordCount));
-    if (!words) {
-        fprintf(stderr, "Memory allocation failed\n");
-        free_table(table);
-        free(table);
+    return 0;
+}
+
+static int cmp_count_desc(const void *a, const void *b)
+{
+    const Entry *ea = a;
+    const Entry *eb = b;
+    if (ea->count != eb->count)
+        return ea->count < eb->count ? 1 : -1;
+    return strcmp(ea->key, eb->key);
+}
+
+static void print_top(const Table *t, size_t n)
+{
+    if (t->len == 0)
+        return;
+
+    Entry *sorted = malloc(t->len * sizeof(Entry));
+    if (!sorted)
+        return;
+
+    size_t j = 0;
+    for (size_t i = 0; i < t->cap && j < t->len; i++)
+        if (t->entries[i].key)
+            sorted[j++] = t->entries[i];
+
+    qsort(sorted, j, sizeof(Entry), cmp_count_desc);
+
+    printf("\n%-4s  %-20s  %10s  %6s\n", "Rank", "Word", "Count", "%");
+    printf("────  ────────────────────  ──────────  ──────\n");
+
+    size_t top = n < j ? n : j;
+    for (size_t i = 0; i < top; i++)
+        printf("%4zu  %-20s  %10zu  %5.2f%%\n",
+               i + 1,
+               sorted[i].key,
+               sorted[i].count,
+               100.0 * (double)sorted[i].count / (double)t->total);
+
+    free(sorted);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Main
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+int main(int argc, char **argv)
+{
+    if (argc != 2) {
+        (void)fprintf(stderr, "usage: %s <file>\n", argv[0]);
         return 1;
     }
-    
-    int word_index = 0;
-    for (int i = 0; i < HASH_SIZE; i++) {
-        WordNode* node = table[i];
-        while (node) {
-            words[word_index].word = node->word;
-            words[word_index].count = node->count;
-            word_index++;
-            node = node->next;
-        }
+
+    int rc = 1;
+    MappedFile mf = { 0 };
+    Worker *workers = NULL;
+    Entry *merged_entries = NULL;
+    int nworkers = 0;
+
+    if (mf_open(&mf, argv[1]) < 0) {
+        (void)fprintf(stderr, "error: cannot open '%s'\n", argv[1]);
+        goto cleanup;
     }
-    
-    qsort(words, unique_words, sizeof(WordCount), compare_words);
-    
-    clock_t end_time = clock();
-    double execution_time = ((double)(end_time - start_time) / CLOCKS_PER_SEC) * 1000.0;
-    
-    double file_size = get_file_size_mb(filename);
-    
-    char total_str[32], unique_str[32];
-    format_number(total_str, total_words);
-    format_number(unique_str, unique_words);
-    
-    printf("\n=== Top 10 Most Frequent Words ===\n");
-    for (int i = 0; i < 10 && i < unique_words; i++) {
-        char count_str[32];
-        format_number(count_str, words[i].count);
-        printf("%2d. %-15s %9s\n", i + 1, words[i].word, count_str);
+
+    nworkers = ncpu();
+    if (nworkers > MAX_THREADS)
+        nworkers = MAX_THREADS;
+    if (mf.size < (1 << 16))
+        nworkers = 1;
+
+    workers = calloc((size_t)nworkers, sizeof(Worker));
+    if (!workers)
+        goto cleanup;
+
+    /* Partition file into chunks, respecting word boundaries */
+    size_t chunk = mf.size / (size_t)nworkers;
+    size_t arena_size = (chunk / 4 > (1 << 20)) ? chunk / 4 : (1 << 20);
+
+    for (int i = 0; i < nworkers; i++) {
+        size_t start = (size_t)i * chunk;
+        size_t end = (i == nworkers - 1) ? mf.size : (size_t)(i + 1) * chunk;
+
+        if (i < nworkers - 1)
+            while (end < mf.size && is_alpha((unsigned char)mf.data[end]))
+                end++;
+        if (i > 0)
+            while (start < end && is_alpha((unsigned char)mf.data[start]))
+                start++;
+
+        workers[i].data = mf.data + start;
+        workers[i].len = end - start;
+        if (table_init(&workers[i].table, INITIAL_CAP, arena_size) < 0)
+            goto cleanup;
     }
-    
-    printf("\n=== Statistics ===\n");
-    printf("File size:       %.2f MB\n", file_size);
-    printf("Total words:     %s\n", total_str);
-    printf("Unique words:    %s\n", unique_str);
-    printf("Execution time:  %.2f ms\n", execution_time);
-    printf("Hash table size: %d buckets\n", HASH_SIZE);
-    printf("Compiler:        ");
-    #ifdef __clang__
-        printf("Clang %s\n", __clang_version__);
-    #elif defined(__GNUC__)
-        printf("GCC %d.%d.%d\n", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
-    #else
-        printf("Unknown\n");
-    #endif
-    
-    char output_filename[256];
-    snprintf(output_filename, sizeof(output_filename), "%.*s_c_results.txt",
-             (int)(strrchr(filename, '.') - filename), filename);
-    
-    FILE* output = fopen(output_filename, "w");
-    if (output) {
-        fprintf(output, "Word Frequency Analysis - C Implementation\n");
-        fprintf(output, "Input file: %s\n", filename);
-        
-        time_t now = time(NULL);
-        fprintf(output, "Generated: %s", ctime(&now));
-        fprintf(output, "Execution time: %.2f ms\n\n", execution_time);
-        fprintf(output, "Total words: %ld\n", total_words);
-        fprintf(output, "Unique words: %d\n\n", unique_words);
-        fprintf(output, "Top 100 Most Frequent Words:\n");
-        fprintf(output, "Rank  Word            Count     Percentage\n");
-        fprintf(output, "----  --------------- --------- ----------\n");
-        
-        for (int i = 0; i < TOP_WORDS && i < unique_words; i++) {
-            double percentage = (words[i].count * 100.0) / total_words;
-            fprintf(output, "%4d  %-15s %9d %10.2f%%\n",
-                    i + 1, words[i].word, words[i].count, percentage);
-        }
-        
-        fclose(output);
-        printf("\nResults written to: %s\n", output_filename);
+
+    if (spawn_workers(workers, nworkers) < 0)
+        goto cleanup;
+    join_workers();
+
+    for (int i = 0; i < nworkers; i++)
+        if (workers[i].err)
+            goto cleanup;
+
+    /* Merge per-thread tables */
+    size_t total_unique = 0;
+    for (int i = 0; i < nworkers; i++)
+        total_unique += workers[i].table.len;
+
+    size_t merged_cap = INITIAL_CAP;
+    while (merged_cap < total_unique * 2)
+        merged_cap *= 2;
+
+    merged_entries = calloc(merged_cap, sizeof(Entry));
+    if (!merged_entries)
+        goto cleanup;
+
+    Table merged = { .entries = merged_entries, .cap = merged_cap };
+    if (merge_into(&merged, workers, nworkers) < 0)
+        goto cleanup;
+
+    /* Output */
+    printf("File:   %s\n", argv[1]);
+    printf("Size:   %.2f MB\n", (double)mf.size / (1024.0 * 1024.0));
+    printf("Words:  %zu total, %zu unique\n", merged.total, merged.len);
+    print_top(&merged, TOP_N);
+
+    rc = 0;
+
+cleanup:
+    free(merged_entries);
+    if (workers) {
+        for (int i = 0; i < nworkers; i++)
+            table_free(&workers[i].table);
+        free(workers);
     }
-    
-    free_table(table);
-    free(table);
-    free(words);
-    
-    return 0;
+    mf_close(&mf);
+    return rc;
 }
